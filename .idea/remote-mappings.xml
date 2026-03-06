@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="RemoteMappingsManager">
+    <list>
+      <list>
+        <remote-mappings server-id="python@sftp://user@10.199.87.35:22/home/user/.conda/envs/RSUDA/bin/python3.8">
+          <settings>
+            <list>
+              <mapping local-root="$PROJECT_DIR$" remote-root="/data/fywdata/code/fyw/UDA/APANet" />
+            </list>
+          </settings>
+        </remote-mappings>
+        <remote-mappings server-id="python@sftp://user@10.199.87.32:22/home/user/.conda/envs/fyw/bin/python3.8">
+          <settings>
+            <list>
+              <mapping local-root="$PROJECT_DIR$/../../DAFormer-master/DAFormer-master" remote-root="/data/fywdata/fyw/UDA/PCA" />
+            </list>
+          </settings>
+        </remote-mappings>
+      </list>
+    </list>
+  </component>
+</project>
