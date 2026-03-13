@@ -391,16 +391,17 @@ class OSNet(BaseSegmentor):
     # 使用cross_EMA生成伪标签
     def encode_decode_crossEMA(self, input=None, dev=None):
         # 1. forward backbone
-        F_t2s = self.forward_backbone(self.backbone_s, input)
+        #F_t2s = self.forward_backbone(self.backbone_s, input)
         F_t2t = self.forward_backbone(self.cross_EMA_backbone, input)
 
         ## 2. forward decode_head
         # 使用decode_head_s和cross_EMA_decoder对特征进行解码
-        P_t2s = self.forward_decode_head(self.decode_head_s, F_t2s)
+        #P_t2s = self.forward_decode_head(self.decode_head_s, F_t2s)
         P_t2t = self.forward_decode_head(self.cross_EMA_decoder, F_t2t)
 
         # 计算P_t2s和P_t2t的平均值，并调整到与输入图像相同的尺寸
-        P_EMA = (P_t2s + P_t2t) / 2
+        #P_EMA = (P_t2s + P_t2t) / 2
+        P_EMA = P_t2t
         P_EMA_KD = P_EMA.detach()
         P_EMA = resize(
             input=P_EMA,

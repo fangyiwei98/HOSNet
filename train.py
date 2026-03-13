@@ -25,7 +25,7 @@ from mmseg.utils import collect_env, get_root_logger, setup_multi_processes
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Train a segmentor')
-    parser.add_argument('--config', default='experiments/deeplabv3/config/OSNet_40k_Potsdam2Vaihingen.py', help='train config file path')
+    parser.add_argument('--config', default='experiments/segformerb5/config/OSNet_40k_Potsdam2Vaihingen.py', help='train config file path')
     # 添加工作目录参数，用于保存日志和模型
     parser.add_argument('--work-dir', default='./OSNet_P2V/',help='the dir to save logs and models')
     # 添加从检查点文件加载权重的参数
@@ -44,7 +44,7 @@ def parse_args():
     group_gpus.add_argument('--gpu-ids',type=int,nargs='+',help='(Deprecated, please use --gpu-id) ids of gpus to use '
         '(only applicable to non-distributed training)')
     # 添加GPU ID参数
-    group_gpus.add_argument('--gpu-id',type=int,default=3,help='id of gpu to use '
+    group_gpus.add_argument('--gpu-id',type=int,default=1,help='id of gpu to use '
         '(only applicable to non-distributed training)')
     parser.add_argument('--seed', type=int, default=None, help='random seed')
     # 添加设置CUDNN后端为确定性选项的布尔参数

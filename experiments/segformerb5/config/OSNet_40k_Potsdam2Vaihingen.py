@@ -1,6 +1,7 @@
 _base_ = [
     '../../../configs/_base_/datasets/P2V.py', '../../../configs/_base_/default_runtime.py',
 ]
+
 # model settings
 norm_cfg = dict(type='SyncBN', requires_grad=True)
 model = dict(
@@ -28,24 +29,28 @@ model = dict(
         in_index=[0, 1, 2, 3],
         channels=256,
         dropout_ratio=0.1,
-        num_classes=6,
+        num_classes=5,  # 源域解码器：仅5类（不含clutter）
         norm_cfg=norm_cfg,
         align_corners=False,
-        #sampler=dict(type='OHEMPixelSampler', thresh=0.7, min_kept=100000),
+        # 移除class_weight参数，使用默认等权重
         loss_decode=dict(
-            type='CrossEntropyLoss', use_sigmoid=False, loss_weight=1.0, class_weight=[1.0, 1.0, 1.0, 1.25, 1.5, 1.5])),
+            type='CrossEntropyLoss',
+            use_sigmoid=False,
+            loss_weight=1.0)),
     decode_head_t=dict(
         type='SegformerHead',
         in_channels=[64, 128, 320, 512],
         in_index=[0, 1, 2, 3],
         channels=256,
         dropout_ratio=0.1,
-        num_classes=6,
+        num_classes=6,  # 目标域解码器：保留6类
         norm_cfg=norm_cfg,
         align_corners=False,
-        #sampler=dict(type='OHEMPixelSampler', thresh=0.7, min_kept=100000),
+        # 移除class_weight参数，使用默认等权重
         loss_decode=dict(
-            type='CrossEntropyLoss', use_sigmoid=False, loss_weight=1.0, class_weight=[1.0, 1.0, 1.25, 1.25, 1.5, 1.5])),
+            type='CrossEntropyLoss',
+            use_sigmoid=False,
+            loss_weight=1.0)),
     discriminator_s=dict(
         type='AdapSegDiscriminator',
         num_conv=2,
@@ -60,11 +65,11 @@ model = dict(
     cross_EMA = dict(
         ## two types: 'single_t', 'decoder_only_t'
         type='single_t',
-        #type='single_t',
         training_ratio=0.25,
         decay=0.999,
         pseudo_threshold=0.975,
         pseudo_rare_threshold=0.8,
+        # 移除pseudo_class_weight参数（如需保留，需确保6个值，示例保留但注释说明）
         pseudo_class_weight=[1.01, 1.01, 1.51, 1.51, 2.01, 2.01],
         backbone_EMA=dict(
             type='MixVisionTransformer',
@@ -88,18 +93,21 @@ model = dict(
             in_index=[0, 1, 2, 3],
             channels=256,
             dropout_ratio=0.1,
-            num_classes=6,
+            num_classes=6,  # 教师网络解码器：保留6类
             norm_cfg=norm_cfg,
             align_corners=False,
+            # 移除class_weight参数，使用默认等权重
             loss_decode=dict(
-                type='CrossEntropyLoss', use_sigmoid=False, loss_weight=1.0, class_weight=[1.0, 1.0, 1.0, 1.25, 1.5, 1.5]))
+                type='CrossEntropyLoss',
+                use_sigmoid=False,
+                loss_weight=1.0))
     ),
     # model training and testing settings
     train_cfg=dict(),
     test_cfg=dict(mode='slide', crop_size=(1024, 1024), stride=(768, 768)))
 
+# 覆盖数据集配置中的workers_per_gpu
 data = dict(samples_per_gpu=4, workers_per_gpu=8)
-
 
 # learning policy
 lr_config = dict(
@@ -153,5 +161,4 @@ optimizer = dict(
     discriminator_s=dict(type='Adam', lr=0.00001, betas=(0.9, 0.99)))
 
 runner = None
-#use_ddp_wrapper = True
 find_unused_parameters = True
