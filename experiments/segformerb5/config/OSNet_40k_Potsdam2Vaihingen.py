@@ -1,7 +1,6 @@
 _base_ = [
     '../../../configs/_base_/datasets/P2V.py', '../../../configs/_base_/default_runtime.py',
 ]
-
 # model settings
 norm_cfg = dict(type='SyncBN', requires_grad=True)
 model = dict(
@@ -23,34 +22,37 @@ model = dict(
         drop_rate=0.0,
         attn_drop_rate=0.0,
         drop_path_rate=0.1),
+    # ------------------- 源域解码器（Open-Set关键配置） -------------------
     decode_head_s=dict(
         type='SegformerHead',
         in_channels=[64, 128, 320, 512],
         in_index=[0, 1, 2, 3],
         channels=256,
         dropout_ratio=0.1,
-        num_classes=5,  # 源域解码器：仅5类（不含clutter）
+        num_classes=2,
         norm_cfg=norm_cfg,
         align_corners=False,
-        # 移除class_weight参数，使用默认等权重
+        ignore_index=255,
         loss_decode=dict(
             type='CrossEntropyLoss',
             use_sigmoid=False,
-            loss_weight=1.0)),
+            loss_weight=1.0)),  # 移除class_weight
+    # ------------------- 目标域解码器（保留全类别） -------------------
     decode_head_t=dict(
         type='SegformerHead',
         in_channels=[64, 128, 320, 512],
         in_index=[0, 1, 2, 3],
         channels=256,
         dropout_ratio=0.1,
-        num_classes=6,  # 目标域解码器：保留6类
+        num_classes=6,
         norm_cfg=norm_cfg,
         align_corners=False,
-        # 移除class_weight参数，使用默认等权重
+        ignore_index=255,
         loss_decode=dict(
             type='CrossEntropyLoss',
             use_sigmoid=False,
-            loss_weight=1.0)),
+            loss_weight=1.0)),  # 移除class_weight
+    # ------------------- 判别器（适配源域特征维度） -------------------
     discriminator_s=dict(
         type='AdapSegDiscriminator',
         num_conv=2,
@@ -62,15 +64,14 @@ model = dict(
             loss_weight=0.005),
         norm_cfg=dict(type='IN'),
         in_channels=512),
+    # ------------------- EMA教师网络（适配Open-Set） -------------------
     cross_EMA = dict(
-        ## two types: 'single_t', 'decoder_only_t'
         type='single_t',
         training_ratio=0.25,
         decay=0.999,
         pseudo_threshold=0.975,
         pseudo_rare_threshold=0.8,
-        # 移除pseudo_class_weight参数（如需保留，需确保6个值，示例保留但注释说明）
-        pseudo_class_weight=[1.01, 1.01, 1.51, 1.51, 2.01, 2.01],
+        pseudo_class_weight=None,  # 移除类别权重
         backbone_EMA=dict(
             type='MixVisionTransformer',
             init_cfg=dict(type='Pretrained', checkpoint='./pretrained/mit_b5.pth'),
@@ -93,21 +94,18 @@ model = dict(
             in_index=[0, 1, 2, 3],
             channels=256,
             dropout_ratio=0.1,
-            num_classes=6,  # 教师网络解码器：保留6类
+            num_classes=6,
             norm_cfg=norm_cfg,
             align_corners=False,
-            # 移除class_weight参数，使用默认等权重
+            ignore_index=255,
             loss_decode=dict(
                 type='CrossEntropyLoss',
                 use_sigmoid=False,
-                loss_weight=1.0))
-    ),
+                loss_weight=1.0))),  # 移除class_weight
     # model training and testing settings
     train_cfg=dict(),
-    test_cfg=dict(mode='slide', crop_size=(1024, 1024), stride=(768, 768)))
-
-# 覆盖数据集配置中的workers_per_gpu
-data = dict(samples_per_gpu=4, workers_per_gpu=8)
+    test_cfg=dict(mode='slide', crop_size=(1024, 1024), stride=(768, 768),
+                  decode_head='decode_head_t'))
 
 # learning policy
 lr_config = dict(
@@ -162,3 +160,6 @@ optimizer = dict(
 
 runner = None
 find_unused_parameters = True
+
+# 工作目录
+work_dir = './experiments/deeplabv3/ST-DASegNet_openset_results/'

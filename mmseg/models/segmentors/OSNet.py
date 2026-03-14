@@ -103,9 +103,9 @@ class OSNet(BaseSegmentor):
         log_vars['loss_contrast'] = contrast_loss.item()  # 记录对比损失到日志
         # ===================== 对比损失结束 =====================
 
-        # 3.对融合后的图像进行预测(source and target decoder)
-        P_s2s = self.forward_decode_head(self.decode_head_s, F_s2s)
-        P_t2s = self.forward_decode_head(self.decode_head_s, F_t2s)
+        # 3.对融合后的图像进行预测(修改：源域用decode_head_s，目标域用decode_head_t)
+        P_s2s = self.forward_decode_head(self.decode_head_s, F_s2s)  # 源域→decode_head_s
+        P_t2s = self.forward_decode_head(self.decode_head_t, F_t2s)  # 目标域→decode_head_t
 
         # 4. 计算源域损失
         loss_seg_s2s, log_vars_seg_s2s = self._get_segmentor_loss(self.decode_head_s, P_s2s,
@@ -117,14 +117,14 @@ class OSNet(BaseSegmentor):
         # 5.1使用目标域图像（B_img）和特征图（F_t2s_dsk, F_t2t_dsk）来生成伪标签（pseudo_label）和伪标签权重（pseudo_weight）
         pseudo_label, pseudo_weight, P_EMA_detach = self.encode_decode_crossEMA(input=data_batch['B_img'],
                                                                                 dev=data_batch['img'].device)
-        # 5.2使用源域的解码头和伪标签来计算针对P_t2s的分割损失
-        loss_seg_t2s, log_vars_seg_t2s = self._get_segmentor_loss(self.decode_head_s, P_t2s, pseudo_label,
+        # 5.2使用目标域的解码头和伪标签来计算针对P_t2s的分割损失（修改：用decode_head_t）
+        loss_seg_t2s, log_vars_seg_t2s = self._get_segmentor_loss(self.decode_head_t, P_t2s, pseudo_label,
                                                                   gt_weight=pseudo_weight)
         log_vars_seg_t2s['loss_ce_seg_t2s'] = log_vars_seg_t2s.pop('loss_ce')
         log_vars_seg_t2s['acc_seg_t2s'] = log_vars_seg_t2s.pop('acc_seg')
         log_vars_seg_t2s['loss_ce_seg_t2s'] = log_vars_seg_t2s.pop('loss')
         log_vars.update(log_vars_seg_t2s)
-        # 5.3使用目标域的解码头和相同的伪标签来计算针对P_t2s的分割损失
+        # 5.3使用目标域的解码头和相同的伪标签来计算针对P_t2s的分割损失（修改：统一用decode_head_t）
         loss_seg_t2t, log_vars_seg_t2t = self._get_segmentor_loss(self.decode_head_t, P_t2s, pseudo_label,
                                                                   gt_weight=pseudo_weight)
         log_vars_seg_t2t['loss_ce_seg_t2t'] = log_vars_seg_t2t.pop('loss_ce')
@@ -288,20 +288,12 @@ class OSNet(BaseSegmentor):
         # 根据比例生成权重张量，所有元素初始化为权重比例值
         pseudo_weight = pseudo_weight_ratio * torch.ones(pseudo_prob.shape, device=dev)
 
-        # 2. 应用类别平衡策略
-        # 2.1 如果设置了类别权重和稀有类别阈值
+        # 2. 应用类别平衡策略（修改：移除类别权重逻辑）
         if self.cross_EMA_pseu_cls_weight is not None and self.cross_EMA_rare_pseu_thre is not None:
             # 判断哪些伪标签的概率大于或等于稀有类别阈值
             ps_large_p_rare = pseudo_prob.ge(self.cross_EMA_rare_pseu_thre).long() == 1
             # 更新权重张量，只有大于或等于稀有类别阈值的伪标签才保留原有权重
             pseudo_weight = pseudo_weight * ps_large_p_rare
-            # 创建一个与伪标签形状相同的浮点数张量，用于存储类别权重
-            pseudo_class_weight = copy.deepcopy(pseudo_label.float())
-            # 遍历类别权重列表，将对应类别的伪标签权重设置为类别权重值
-            for i in range(len(self.cross_EMA_pseu_cls_weight)):
-                pseudo_class_weight[pseudo_class_weight == i] = self.cross_EMA_pseu_cls_weight[i]
-            # 更新权重张量，将类别权重与原有权重相乘
-            pseudo_weight = pseudo_class_weight * pseudo_weight
             # 如果权重为0，则设置为权重比例的0.5倍，避免权重完全为0
             pseudo_weight[pseudo_weight == 0] = pseudo_weight_ratio * 0.5
 
@@ -421,7 +413,7 @@ class OSNet(BaseSegmentor):
         self.cross_EMA_type = cfg['type']
         self.cross_EMA_alpha = cfg['decay']
         self.cross_EMA_training_ratio = cfg['training_ratio']
-        self.cross_EMA_pseu_cls_weight = cfg['pseudo_class_weight']
+        self.cross_EMA_pseu_cls_weight = cfg.get('pseudo_class_weight', None)  # 兼容None值
         self.cross_EMA_pseu_thre = cfg['pseudo_threshold']
         self.cross_EMA_rare_pseu_thre = cfg['pseudo_rare_threshold']
         self.cross_EMA_backbone = builder.build_backbone(cfg['backbone_EMA'])
@@ -476,8 +468,8 @@ class OSNet(BaseSegmentor):
         ## 1. forward backbone
         F_t2s = self.forward_backbone(self.backbone_s, img)
 
-        ## 2. forward decode_head
-        P_t2s = self.forward_decode_head(self.decode_head_s, F_t2s)
+        ## 2. forward decode_head（修改：测试阶段用decode_head_t）
+        P_t2s = self.forward_decode_head(self.decode_head_t, F_t2s)
         out = P_t2s
         out = resize(
             input=out,
@@ -490,7 +482,7 @@ class OSNet(BaseSegmentor):
     def _decode_head_forward_test(self, x, img_metas):
         """Run forward function and calculate loss for decode head in
         inference."""
-        seg_logits = self.decode_head_s.forward_test(x, img_metas, self.test_cfg)
+        seg_logits = self.decode_head_t.forward_test(x, img_metas, self.test_cfg)  # 修改：用decode_head_t
         return seg_logits
 
     # 虚拟前向传播函数

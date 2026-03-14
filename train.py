@@ -6,7 +6,7 @@ import time
 
 import mmcv
 import torch
-#用于处理批量归一化的函数
+# 用于处理批量归一化的函数
 from mmcv.cnn.utils import revert_sync_batchnorm
 ## 分布式训练相关的函数
 from mmcv.runner import get_dist_info, init_dist
@@ -25,40 +25,44 @@ from mmseg.utils import collect_env, get_root_logger, setup_multi_processes
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Train a segmentor')
-    parser.add_argument('--config', default='experiments/segformerb5/config/OSNet_40k_Potsdam2Vaihingen.py', help='train config file path')
+    parser.add_argument('--config', default='experiments/segformerb5/config/OSNet_40k_Potsdam2Vaihingen.py',
+                        help='train config file path')
     # 添加工作目录参数，用于保存日志和模型
-    parser.add_argument('--work-dir', default='./OSNet_P2V/',help='the dir to save logs and models')
+    parser.add_argument('--work-dir', default='./OSNet_P2V/', help='the dir to save logs and models')
     # 添加从检查点文件加载权重的参数
     parser.add_argument('--load-from', help='the checkpoint file to load weights from')
     # 添加从检查点文件恢复训练的参数
     parser.add_argument('--resume-from', help='the checkpoint file to resume from')
     # 添加是否在训练过程中评估检查点的布尔参数
-    parser.add_argument('--no-validate',action='store_true',help='whether not to evaluate the checkpoint during training')
+    parser.add_argument('--no-validate', action='store_true',
+                        help='whether not to evaluate the checkpoint during training')
     # 创建一个互斥参数组，用于指定GPU的使用情况
     group_gpus = parser.add_mutually_exclusive_group()
     # 添加过时的GPU使用参数
-    group_gpus.add_argument('--gpus',type=int,#default=5,
-        help='(Deprecated, please use --gpu-id) number of gpus to use '
-        '(only applicable to non-distributed training)')
+    group_gpus.add_argument('--gpus', type=int,  # default=5,
+                            help='(Deprecated, please use --gpu-id) number of gpus to use '
+                                 '(only applicable to non-distributed training)')
     # 添加过时的GPU ID使用参数
-    group_gpus.add_argument('--gpu-ids',type=int,nargs='+',help='(Deprecated, please use --gpu-id) ids of gpus to use '
-        '(only applicable to non-distributed training)')
+    group_gpus.add_argument('--gpu-ids', type=int, nargs='+',
+                            help='(Deprecated, please use --gpu-id) ids of gpus to use '
+                                 '(only applicable to non-distributed training)')
     # 添加GPU ID参数
-    group_gpus.add_argument('--gpu-id',type=int,default=1,help='id of gpu to use '
-        '(only applicable to non-distributed training)')
+    group_gpus.add_argument('--gpu-id', type=int, default=2, help='id of gpu to use '
+                                                                  '(only applicable to non-distributed training)')
     parser.add_argument('--seed', type=int, default=None, help='random seed')
     # 添加设置CUDNN后端为确定性选项的布尔参数
-    parser.add_argument('--deterministic',action='store_true',help='whether to set deterministic options for CUDNN backend.')
+    parser.add_argument('--deterministic', action='store_true',
+                        help='whether to set deterministic options for CUDNN backend.')
     # 添加覆盖配置文件设置的参数
-    parser.add_argument('--options',nargs='+',action=DictAction,  help='options')
+    parser.add_argument('--options', nargs='+', action=DictAction, help='options')
     # 添加覆盖配置文件设置的新参数
-    parser.add_argument('--cfg-options',nargs='+',action=DictAction,  help='override some settings in the used config')
+    parser.add_argument('--cfg-options', nargs='+', action=DictAction, help='override some settings in the used config')
     # 添加作业启动器参数
-    parser.add_argument('--launcher',choices=['none', 'pytorch', 'slurm', 'mpi'],default='none',help='job launcher')
+    parser.add_argument('--launcher', choices=['none', 'pytorch', 'slurm', 'mpi'], default='none', help='job launcher')
     # 添加本地排名参数，用于分布式训练
     parser.add_argument('--local_rank', type=int, default=0)
     # 添加自动从最新检查点恢复的布尔参数
-    parser.add_argument('--auto-resume',action='store_true',help='resume from the latest checkpoint automatically.')
+    parser.add_argument('--auto-resume', action='store_true', help='resume from the latest checkpoint automatically.')
     args = parser.parse_args()
     # 设置环境变量LOCAL_RANK
     if 'LOCAL_RANK' not in os.environ:
@@ -160,16 +164,23 @@ def main():
     # 构建训练数据集
     datasets = [build_dataset(cfg.data.train)]
 
-    # 打印训练集类别信息
-    print("===== 训练集类别信息 =====")
-    # 兼容数据集为列表的情况（多数据集训练）
-    if isinstance(datasets, list):
-        for i, ds in enumerate(datasets):
-            print(f"训练子集 {i + 1} 类别数: {len(ds.CLASSES)}")
-            print(f"训练子集 {i + 1} 类别列表: {ds.CLASSES}")
-    else:
-        print(f"类别数: {len(datasets.CLASSES)}")
-        print(f"类别列表: {datasets.CLASSES}")
+    # ===================== 核心修改：打印源域和目标域类别 =====================
+    # 获取训练数据集实例（PVDataset_forAdap）
+    train_dataset = datasets[0]
+
+    # 打印源域信息
+    logger.info("=" * 80)
+    logger.info(f"【源域训练类别】: {train_dataset.source_included_classes}")
+    logger.info(f"【源域有效类别数】: {train_dataset.source_num_classes}")
+    logger.info(
+        f"【源域被忽略的类别】: {[cls for cls in train_dataset.FULL_CLASSES if cls not in train_dataset.source_included_classes]}")
+    logger.info(f"【源域标签映射表】: {train_dataset.source_label_map}")  # 查看原始标签→训练标签的映射
+
+    # 打印目标域信息（目标域固定为全6类）
+    logger.info(f"【目标域训练类别】: {train_dataset.FULL_CLASSES}")
+    logger.info(f"【目标域类别数】: {len(train_dataset.FULL_CLASSES)}")
+    logger.info("=" * 80)
+    # ======================================================================
 
     # 如果工作流包括验证步骤，构建验证数据集
     if len(cfg.workflow) == 2:
@@ -177,18 +188,6 @@ def main():
 
         val_dataset.pipeline = cfg.data.train.pipeline
         datasets.append(build_dataset(val_dataset))
-
-        valdataset=build_dataset(val_dataset)
-        # 打印验证集类别信息
-        print("\n===== 验证集类别信息 =====")
-        if isinstance(valdataset, list):
-            for i, ds in enumerate(valdataset):
-                print(f"验证子集 {i + 1} 类别数: {len(ds.CLASSES)}")
-                print(f"验证子集 {i + 1} 类别列表: {ds.CLASSES}")
-        else:
-            print(f"类别数: {len(valdataset.CLASSES)}")
-            print(f"类别列表: {valdataset.CLASSES}")
-        print("=" * 25)
     # 如果配置了检查点，保存mmseg版本、配置文件内容和类别名称
     if cfg.checkpoint_config is not None:
         # save mmseg version, config file content and class names in
@@ -201,22 +200,9 @@ def main():
     # 为了方便可视化，添加类别属性
     model.CLASSES = datasets[0].CLASSES
 
-    # # 打印训练集类别信息
-    # print("===== 训练集类别信息 =====")
-    # # 兼容数据集为列表的情况（多数据集训练）
-    # if isinstance(datasets[0], list):
-    #     for i, ds in enumerate(datasets[0]):
-    #         print(f"训练子集 {i + 1} 类别数: {len(ds.CLASSES)}")
-    #         print(f"训练子集 {i + 1} 类别列表: {ds.CLASSES}")
-    # else:
-    #     print(f"类别数: {len(datasets[0].CLASSES)}")
-    #     print(f"类别列表: {datasets[0].CLASSES}")
-
-
-
     # 保存最佳检查点的元数据
     meta.update(cfg.checkpoint_config.meta)
-    
+
     train_segmentor(
         model,
         datasets,
@@ -226,6 +212,6 @@ def main():
         timestamp=timestamp,
         meta=meta)
 
-if __name__ == '__main__':
 
+if __name__ == '__main__':
     main()
