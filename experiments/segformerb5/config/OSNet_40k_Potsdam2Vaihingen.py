@@ -4,6 +4,8 @@ _base_ = [
 
 # 同步控制源域类别数和解码器num_classes！！！
 source_included_classes = ['impervious_surface', 'building', 'low_vegetation', 'tree', 'car']
+target_included_classes = ['impervious_surface', 'building', 'low_vegetation', 'tree', 'car', 'clutter']
+
 
 # model settings
 norm_cfg = dict(type='SyncBN', requires_grad=True)
@@ -115,7 +117,12 @@ model = dict(
 data = dict(
     train=dict(
         source_included_classes=source_included_classes  # 同步类别列表到数据集
-    )
+    ),
+    val=dict(
+        source_included_classes=target_included_classes
+    ),
+    test=dict(
+        source_included_classes=target_included_classes)
 )
 
 # learning policy
@@ -130,7 +137,7 @@ lr_config = dict(
 
 total_iters = 40000
 checkpoint_config = dict(by_epoch=False, interval=4000)
-evaluation = dict(interval=1000, metric='mIoU', pre_eval=True)
+evaluation = dict(interval=2000, metric='mIoU', pre_eval=True)
 
 # optimizer setting
 optimizer = dict(
