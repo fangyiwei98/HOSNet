@@ -47,7 +47,7 @@ def parse_args():
                             help='(Deprecated, please use --gpu-id) ids of gpus to use '
                                  '(only applicable to non-distributed training)')
     # 添加GPU ID参数
-    group_gpus.add_argument('--gpu-id', type=int, default=2, help='id of gpu to use '
+    group_gpus.add_argument('--gpu-id', type=int, default=1, help='id of gpu to use '
                                                                   '(only applicable to non-distributed training)')
     parser.add_argument('--seed', type=int, default=None, help='random seed')
     # 添加设置CUDNN后端为确定性选项的布尔参数
