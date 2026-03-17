@@ -1,6 +1,10 @@
 _base_ = [
     '../../../configs/_base_/datasets/P2V.py', '../../../configs/_base_/default_runtime.py',
 ]
+
+# 同步控制源域类别数和解码器num_classes！！！
+source_included_classes = ['impervious_surface', 'building', 'low_vegetation', 'tree', 'car']
+
 # model settings
 norm_cfg = dict(type='SyncBN', requires_grad=True)
 model = dict(
@@ -22,21 +26,21 @@ model = dict(
         drop_rate=0.0,
         attn_drop_rate=0.0,
         drop_path_rate=0.1),
-    # ------------------- 源域解码器（Open-Set关键配置） -------------------
+    # ------------------- 源域解码器（动态设置num_classes） -------------------
     decode_head_s=dict(
         type='SegformerHead',
         in_channels=[64, 128, 320, 512],
         in_index=[0, 1, 2, 3],
         channels=256,
         dropout_ratio=0.1,
-        num_classes=2,
+        num_classes=len(source_included_classes),  # 动态计算类别数
         norm_cfg=norm_cfg,
         align_corners=False,
         ignore_index=255,
         loss_decode=dict(
             type='CrossEntropyLoss',
             use_sigmoid=False,
-            loss_weight=1.0)),  # 移除class_weight
+            loss_weight=1.0)),
     # ------------------- 目标域解码器（保留全类别） -------------------
     decode_head_t=dict(
         type='SegformerHead',
@@ -51,8 +55,8 @@ model = dict(
         loss_decode=dict(
             type='CrossEntropyLoss',
             use_sigmoid=False,
-            loss_weight=1.0)),  # 移除class_weight
-    # ------------------- 判别器（适配源域特征维度） -------------------
+            loss_weight=1.0)),
+    # ------------------- 判别器-------------------
     discriminator_s=dict(
         type='AdapSegDiscriminator',
         num_conv=2,
@@ -71,7 +75,7 @@ model = dict(
         decay=0.999,
         pseudo_threshold=0.975,
         pseudo_rare_threshold=0.8,
-        pseudo_class_weight=None,  # 移除类别权重
+        pseudo_class_weight=None,
         backbone_EMA=dict(
             type='MixVisionTransformer',
             init_cfg=dict(type='Pretrained', checkpoint='./pretrained/mit_b5.pth'),
@@ -101,11 +105,18 @@ model = dict(
             loss_decode=dict(
                 type='CrossEntropyLoss',
                 use_sigmoid=False,
-                loss_weight=1.0))),  # 移除class_weight
+                loss_weight=1.0))),
     # model training and testing settings
     train_cfg=dict(),
     test_cfg=dict(mode='slide', crop_size=(1024, 1024), stride=(768, 768),
                   decode_head='decode_head_t'))
+
+# -------------------------- 覆盖P2V.py中的data配置 --------------------------
+data = dict(
+    train=dict(
+        source_included_classes=source_included_classes  # 同步类别列表到数据集
+    )
+)
 
 # learning policy
 lr_config = dict(
@@ -119,7 +130,7 @@ lr_config = dict(
 
 total_iters = 40000
 checkpoint_config = dict(by_epoch=False, interval=4000)
-evaluation = dict(interval=4000, metric='mIoU', pre_eval=True)
+evaluation = dict(interval=1000, metric='mIoU', pre_eval=True)
 
 # optimizer setting
 optimizer = dict(
@@ -160,6 +171,3 @@ optimizer = dict(
 
 runner = None
 find_unused_parameters = True
-
-# 工作目录
-work_dir = './experiments/deeplabv3/ST-DASegNet_openset_results/'

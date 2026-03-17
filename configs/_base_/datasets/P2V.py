@@ -5,13 +5,6 @@ img_norm_cfg = dict(
     mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.375], to_rgb=True)
 crop_size = (384, 384)
 
-# -------------------------- 新增：源域参与训练的类别配置 --------------------------
-# 示例1：排除'clutter'类别（仅用前5类训练）
-#source_included_classes = ['impervious_surface', 'building', 'low_vegetation', 'tree', 'car']
-# 示例2：仅保留建筑和道路（按需修改）
-source_included_classes = ['impervious_surface', 'building', 'low_vegetation', 'tree']
-# 示例3：使用全部6类（默认）
-# source_included_classes = ['impervious_surface', 'building', 'low_vegetation', 'tree', 'car', 'clutter']
 
 train_pipeline = [
     dict(type='LoadImageFromFile_forAdap'),
@@ -48,14 +41,10 @@ data = dict(
         img_dir='Potsdam_IRRG/img_dir/train',
         ann_dir='Potsdam_IRRG/ann_dir/train',
         split='Potsdam_IRRG/train.txt',
-        # -------------------------- 新增：传递源域类别筛选参数 --------------------------
-        source_included_classes=source_included_classes,
         ignore_label=255,
-        # -----------------------------------------------------------------------------
         B_img_dir = 'Vaihingen_IRRG/img_dir/train',
         B_split = 'Vaihingen_IRRG/train.txt',
         pipeline=train_pipeline),
-    # 验证/测试集：目标域始终使用全部6类，无需传递source_included_classes
     val=dict(
         type=dataset_type,
         data_root=data_root,
