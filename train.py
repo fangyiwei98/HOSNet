@@ -25,7 +25,7 @@ from mmseg.utils import collect_env, get_root_logger, setup_multi_processes
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Train a segmentor')
-    parser.add_argument('--config', default='experiments/segformerb5/config/OSNet_40k_Potsdam2Vaihingen.py',
+    parser.add_argument('--config', default='experiments/deeplabv3/config/OSNet_40k_Vaihingen2PotsdamRGB.py',
                         help='train config file path')
     # 添加工作目录参数，用于保存日志和模型
     parser.add_argument('--work-dir', default='./OSNet_P2V/', help='the dir to save logs and models')

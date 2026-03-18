@@ -1,6 +1,12 @@
 _base_ = [
     '../../../configs/_base_/datasets/P2V.py', '../../../configs/_base_/default_runtime.py'
 ]
+
+# 同步控制源域类别数和解码器num_classes！！！
+source_included_classes = ['impervious_surface', 'building', 'low_vegetation', 'tree', 'car']
+target_included_classes = ['impervious_surface', 'building', 'low_vegetation', 'tree', 'car', 'clutter']
+
+
 norm_cfg = dict(type='SyncBN', requires_grad=True)
 model = dict(
     type='OSNet',
@@ -27,11 +33,11 @@ model = dict(
         #c1_in_channels=0,
         #c1_channels=0,
         dropout_ratio=0.1,
-        num_classes=6,
+        num_classes=len(source_included_classes),  # 动态计算类别数
         norm_cfg=norm_cfg,
         align_corners=False,
         loss_decode=dict(
-            type='CrossEntropyLoss', use_sigmoid=False, loss_weight=1.0, class_weight=[1.0, 1.0, 1.0, 1.25, 1.5, 1.5])),
+            type='CrossEntropyLoss', use_sigmoid=False, loss_weight=1.0)),
     decode_head_t=dict(
         type='DepthwiseSeparableASPPHead',
         in_channels=2048,
@@ -47,7 +53,7 @@ model = dict(
         norm_cfg=norm_cfg,
         align_corners=False,
         loss_decode=dict(
-            type='CrossEntropyLoss', use_sigmoid=False, loss_weight=1.0, class_weight=[1.0, 1.0, 1.0, 1.25, 1.5, 1.5])),
+            type='CrossEntropyLoss', use_sigmoid=False, loss_weight=1.0)),
     discriminator_s=dict(
         type='AdapSegDiscriminator',
         gan_loss=dict(
@@ -65,7 +71,7 @@ model = dict(
         decay=0.999,
         pseudo_threshold=0.975,
         pseudo_rare_threshold=0.8,
-        pseudo_class_weight=[1.01, 1.01, 1.51, 1.51, 2.01, 2.01],
+        pseudo_class_weight=None,
         backbone_EMA=dict(
                 type='ResNetV1c',
                 depth=50,
@@ -92,11 +98,12 @@ model = dict(
                 norm_cfg=norm_cfg,
                 align_corners=False,
                 loss_decode=dict(
-                    type='CrossEntropyLoss', use_sigmoid=False, loss_weight=1.0, class_weight=[1.0, 1.0, 1.0, 1.25, 1.5, 1.5]))
+                    type='CrossEntropyLoss', use_sigmoid=False, loss_weight=1.0))
     ),
     # model training and testing settings
     train_cfg=dict(),
-    test_cfg=dict(mode='whole'))
+    test_cfg=dict(mode='whole',
+                  decode_head='decode_head_t'))
 
 # learning policy
 lr_config = dict(policy='poly', power=0.9, min_lr=1e-5, by_epoch=False)
@@ -109,10 +116,23 @@ optimizer = dict(
     discriminator_s=dict(type='Adam', lr=0.00025, betas=(0.9, 0.99)),
     )
 
-data = dict(samples_per_gpu=4, workers_per_gpu=4,
-            train=dict(img_dir='Potsdam_RGB/img_dir/train', ann_dir='Potsdam_RGB/ann_dir/train', split='Potsdam_RGB/train.txt'))
+data = dict(
+    samples_per_gpu=4,
+    workers_per_gpu=4,
+    train=dict(
+        img_dir='Potsdam_RGB/img_dir/train',
+        ann_dir='Potsdam_RGB/ann_dir/train',
+        split='Potsdam_RGB/train.txt',
+        source_included_classes=source_included_classes  # 同步类别列表到数据集
+    ),
+    val=dict(
+        source_included_classes=target_included_classes
+    ),
+    test=dict(
+        source_included_classes=target_included_classes)
+)
 total_iters = 40000
-checkpoint_config = dict(by_epoch=False, interval=4000)
-evaluation = dict(interval=4000, metric='mIoU', pre_eval=True)
+checkpoint_config = dict(by_epoch=False, interval=5000)
+evaluation = dict(interval=5000, metric='mIoU', pre_eval=True)
 runner = None
 find_unused_parameters = True

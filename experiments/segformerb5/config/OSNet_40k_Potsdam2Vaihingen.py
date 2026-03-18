@@ -53,7 +53,6 @@ model = dict(
         num_classes=6,
         norm_cfg=norm_cfg,
         align_corners=False,
-        ignore_index=255,
         loss_decode=dict(
             type='CrossEntropyLoss',
             use_sigmoid=False,
