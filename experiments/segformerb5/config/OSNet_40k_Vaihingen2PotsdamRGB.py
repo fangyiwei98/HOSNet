@@ -1,6 +1,13 @@
 _base_ = [
     '../../../configs/_base_/datasets/V2P.py', '../../../configs/_base_/default_runtime.py',
 ]
+
+
+# 同步控制源域类别数和解码器num_classes！！！
+source_included_classes = ['impervious_surface', 'building', 'low_vegetation', 'tree', 'car']
+target_included_classes = ['impervious_surface', 'building', 'low_vegetation', 'tree', 'car', 'clutter']
+
+
 # model settings
 norm_cfg = dict(type='SyncBN', requires_grad=True)
 model = dict(
@@ -22,18 +29,22 @@ model = dict(
         drop_rate=0.0,
         attn_drop_rate=0.0,
         drop_path_rate=0.1),
+    # ------------------- 源域解码器（动态设置num_classes） -------------------
     decode_head_s=dict(
         type='SegformerHead',
         in_channels=[64, 128, 320, 512],
         in_index=[0, 1, 2, 3],
         channels=256,
         dropout_ratio=0.1,
-        num_classes=6,
+        num_classes=len(source_included_classes),  # 动态计算类别数
         norm_cfg=norm_cfg,
         align_corners=False,
-        #sampler=dict(type='OHEMPixelSampler', thresh=0.7, min_kept=100000),
+        ignore_index=255,
         loss_decode=dict(
-            type='CrossEntropyLoss', use_sigmoid=False, loss_weight=1.0, class_weight=[1.0, 1.0, 1.0, 1.25, 1.5, 1.5])),
+            type='CrossEntropyLoss',
+            use_sigmoid=False,
+            loss_weight=1.0)),
+    # ------------------- 目标域解码器（保留全类别） -------------------
     decode_head_t=dict(
         type='SegformerHead',
         in_channels=[64, 128, 320, 512],
@@ -43,9 +54,12 @@ model = dict(
         num_classes=6,
         norm_cfg=norm_cfg,
         align_corners=False,
-        #sampler=dict(type='OHEMPixelSampler', thresh=0.7, min_kept=100000),
+        ignore_index=255,
         loss_decode=dict(
-            type='CrossEntropyLoss', use_sigmoid=False, loss_weight=1.0, class_weight=[1.0, 1.0, 1.25, 1.25, 1.5, 1.5])),
+            type='CrossEntropyLoss',
+            use_sigmoid=False,
+            loss_weight=1.0)),
+    # ------------------- 判别器-------------------
     discriminator_s=dict(
         type='AdapSegDiscriminator',
         num_conv=2,
@@ -57,15 +71,14 @@ model = dict(
             loss_weight=0.005),
         norm_cfg=dict(type='IN'),
         in_channels=512),
+    # ------------------- EMA教师网络（适配Open-Set） -------------------
     cross_EMA = dict(
-        ## two types: 'single_t', 'decoder_only_t'
         type='single_t',
-        #type='single_t',
         training_ratio=0.25,
         decay=0.999,
         pseudo_threshold=0.975,
         pseudo_rare_threshold=0.8,
-        pseudo_class_weight=[1.01, 1.01, 1.51, 1.51, 2.01, 2.01],
+        pseudo_class_weight=None,
         backbone_EMA=dict(
             type='MixVisionTransformer',
             init_cfg=dict(type='Pretrained', checkpoint='./pretrained/mit_b5.pth'),
@@ -91,17 +104,35 @@ model = dict(
             num_classes=6,
             norm_cfg=norm_cfg,
             align_corners=False,
+            ignore_index=255,
             loss_decode=dict(
-                type='CrossEntropyLoss', use_sigmoid=False, loss_weight=1.0, class_weight=[1.0, 1.0, 1.0, 1.25, 1.5, 1.5]))
-    ),
+                type='CrossEntropyLoss',
+                use_sigmoid=False,
+                loss_weight=1.0))),
     # model training and testing settings
     train_cfg=dict(),
-    test_cfg=dict(mode='slide', crop_size=(1024, 1024), stride=(768, 768)))
+    test_cfg=dict(mode='slide', crop_size=(1024, 1024), stride=(768, 768),
+                  decode_head='decode_head_t'))
 
-data = dict(samples_per_gpu=4, workers_per_gpu=8,
-            train=dict(B_img_dir = 'Potsdam_RGB/img_dir/train', B_split = 'Potsdam_RGB/train.txt'),
-            val=dict(img_dir='Potsdam_RGB/img_dir/val', ann_dir='Potsdam_RGB/ann_dir/val', split='Potsdam_RGB/val.txt'),
-            test=dict(img_dir='Potsdam_RGB/img_dir/val', ann_dir='Potsdam_RGB/ann_dir/val', split='Potsdam_RGB/val.txt'))
+data = dict(samples_per_gpu=4,
+            workers_per_gpu=8,
+            train=dict(
+                source_included_classes=source_included_classes,  # 同步类别列表到数据集
+                B_img_dir = 'Potsdam_RGB/img_dir/train',
+                B_split = 'Potsdam_RGB/train.txt'),
+            val=dict(
+                img_dir='Potsdam_RGB/img_dir/val',
+                ann_dir='Potsdam_RGB/ann_dir/val',
+                split='Potsdam_RGB/val.txt',
+                source_included_classes=target_included_classes
+            ),
+            test=dict(
+                img_dir='Potsdam_RGB/img_dir/val',
+                ann_dir='Potsdam_RGB/ann_dir/val',
+                split='Potsdam_RGB/val.txt',
+                source_included_classes=target_included_classes
+            )
+)
 
 # learning policy
 lr_config = dict(
@@ -114,8 +145,8 @@ lr_config = dict(
     by_epoch=False)
 
 total_iters = 40000
-checkpoint_config = dict(by_epoch=False, interval=4000)
-evaluation = dict(interval=4000, metric='mIoU', pre_eval=True)
+checkpoint_config = dict(by_epoch=False, interval=5000)
+evaluation = dict(interval=5000, metric='mIoU', pre_eval=True)
 
 # optimizer setting
 optimizer = dict(

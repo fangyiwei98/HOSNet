@@ -4,6 +4,8 @@ data_root = '/data/fywdata/ISPRS/'
 img_norm_cfg = dict(
     mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.375], to_rgb=True)
 crop_size = (384, 384)
+
+
 train_pipeline = [
     dict(type='LoadImageFromFile_forAdap'),
     dict(type='LoadAnnotations', reduce_zero_label=True),
@@ -21,7 +23,6 @@ test_pipeline = [
     dict(
         type='MultiScaleFlipAug',
         img_scale=(512, 512),
-        # img_ratios=[0.5, 0.75, 1.0, 1.25, 1.5, 1.75],
         flip=False,
         transforms=[
             dict(type='Resize', keep_ratio=True),
@@ -40,12 +41,10 @@ data = dict(
         img_dir='Vaihingen_IRRG/img_dir/train',
         ann_dir='Vaihingen_IRRG/ann_dir/train',
         split='Vaihingen_IRRG/train.txt',
+        ignore_label=255,
         B_img_dir = 'Potsdam_IRRG/img_dir/train',
         B_split = 'Potsdam_IRRG/train.txt',
-        pipeline=train_pipeline,
-        ignore_index=5,  # 这里设置忽略的索引
-    ),
-    # target domain for validation
+        pipeline=train_pipeline),
     val=dict(
         type=dataset_type,
         data_root=data_root,
