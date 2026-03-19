@@ -25,10 +25,10 @@ from mmseg.utils import collect_env, get_root_logger, setup_multi_processes
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Train a segmentor')
-    parser.add_argument('--config', default='experiments/deeplabv3/config/OSNet_40k_Vaihingen2PotsdamRGB.py',
+    parser.add_argument('--config', default='experiments/segformerb5/config_LoveDA/OSNet_40k_U2R.py',
                         help='train config file path')
     # 添加工作目录参数，用于保存日志和模型
-    parser.add_argument('--work-dir', default='./OSNet_P2V/', help='the dir to save logs and models')
+    parser.add_argument('--work-dir', default='./OSNet_R2U/', help='the dir to save logs and models')
     # 添加从检查点文件加载权重的参数
     parser.add_argument('--load-from', help='the checkpoint file to load weights from')
     # 添加从检查点文件恢复训练的参数
