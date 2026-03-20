@@ -388,7 +388,7 @@ class OSNet(BaseSegmentor):
         losses = dict()
         '''print("计算损失时特征图形状：")
         print(pred.shape)'''
-        loss_seg = decode_head.losses(pred, gt_semantic_seg, gt_weight=gt_weight, ignore_index=255)
+        loss_seg = decode_head.losses(pred, gt_semantic_seg, gt_weight=gt_weight)
         losses.update(loss_seg)
         loss_seg, log_vars_seg = self._parse_losses(losses)
         return loss_seg, log_vars_seg

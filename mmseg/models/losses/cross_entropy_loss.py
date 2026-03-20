@@ -14,7 +14,29 @@ def cross_entropy(pred,
                   reduction='mean',
                   avg_factor=None,
                   ignore_index=-100):
-    """The wrapper function for :func:`F.cross_entropy`"""
+    """The wrapper function for :func:`F.cross_entropy` with safety enhancement"""
+    # ========== 核心修复1：强制张量内存连续 + 设备统一 ==========
+    pred = pred.contiguous()  # 确保内存连续，避免CUDA访问错误
+    label = label.contiguous().to(pred.device)  # 统一设备
+    if weight is not None:
+        weight = weight.contiguous().to(pred.device)
+
+    # ========== 核心修复2：维度校验与修正 ==========
+    # pred必须是4D [B,C,H,W]（语义分割）或2D [B,C]（分类）
+    # label统一为3D [B,H,W]（分割）或1D [B]（分类）
+    if pred.dim() == 4:  # 语义分割场景
+        # label移除通道维：[B,1,H,W] → [B,H,W]
+        label = label.squeeze(1) if label.dim() == 4 else label
+        # 确保空间维度匹配
+        assert pred.shape[2:] == label.shape[1:], \
+            f"Spatial shape mismatch! pred: {pred.shape[2:]}, label: {label.shape[1:]}"
+        # ========== 核心修复3：过滤非法标签值 ==========
+        num_classes = pred.shape[1]
+        # 仅保留合法标签（0~num_classes-1）和ignore_index
+        valid_mask = (label >= 0) & (label < num_classes) | (label == ignore_index)
+        label = torch.where(valid_mask, label, torch.tensor(ignore_index, device=label.device))
+
+    # ========== 原有逻辑保留 + 安全增强 ==========
     # class_weight is a manual rescaling weight given to each class.
     # If given, has to be a Tensor of size C element-wise losses
     loss = F.cross_entropy(
@@ -62,22 +84,13 @@ def binary_cross_entropy(pred,
                          avg_factor=None,
                          class_weight=None,
                          ignore_index=255):
-    """Calculate the binary CrossEntropy loss.
+    """Calculate the binary CrossEntropy loss with safety enhancement."""
+    # ========== 安全增强：设备统一 + 内存连续 ==========
+    pred = pred.contiguous()
+    label = label.contiguous().to(pred.device)
+    if weight is not None:
+        weight = weight.contiguous().to(pred.device)
 
-    Args:
-        pred (torch.Tensor): The prediction with shape (N, 1).
-        label (torch.Tensor): The learning label of the prediction.
-        weight (torch.Tensor, optional): Sample-wise loss weight.
-        reduction (str, optional): The method used to reduce the loss.
-            Options are "none", "mean" and "sum".
-        avg_factor (int, optional): Average factor that is used to average
-            the loss. Defaults to None.
-        class_weight (list[float], optional): The weight for each class.
-        ignore_index (int | None): The label index to be ignored. Default: 255
-
-    Returns:
-        torch.Tensor: The calculated loss
-    """
     if pred.dim() != label.dim():
         assert (pred.dim() == 2 and label.dim() == 1) or (
                 pred.dim() == 4 and label.dim() == 3), \
@@ -105,30 +118,16 @@ def mask_cross_entropy(pred,
                        avg_factor=None,
                        class_weight=None,
                        ignore_index=None):
-    """Calculate the CrossEntropy loss for masks.
-
-    Args:
-        pred (torch.Tensor): The prediction with shape (N, C), C is the number
-            of classes.
-        target (torch.Tensor): The learning label of the prediction.
-        label (torch.Tensor): ``label`` indicates the class label of the mask'
-            corresponding object. This will be used to select the mask in the
-            of the class which the object belongs to when the mask prediction
-            if not class-agnostic.
-        reduction (str, optional): The method used to reduce the loss.
-            Options are "none", "mean" and "sum".
-        avg_factor (int, optional): Average factor that is used to average
-            the loss. Defaults to None.
-        class_weight (list[float], optional): The weight for each class.
-        ignore_index (None): Placeholder, to be consistent with other loss.
-            Default: None.
-
-    Returns:
-        torch.Tensor: The calculated loss
-    """
+    """Calculate the CrossEntropy loss for masks with safety enhancement."""
     assert ignore_index is None, 'BCE loss does not support ignore_index'
     # TODO: handle these two reserved arguments
     assert reduction == 'mean' and avg_factor is None
+
+    # ========== 安全增强：设备统一 + 内存连续 ==========
+    pred = pred.contiguous()
+    target = target.contiguous().to(pred.device)
+    label = label.contiguous().to(pred.device)
+
     num_rois = pred.size()[0]
     inds = torch.arange(0, num_rois, dtype=torch.long, device=pred.device)
     pred_slice = pred[inds, label].squeeze(1)
@@ -138,21 +137,13 @@ def mask_cross_entropy(pred,
 
 @LOSSES.register_module()
 class CrossEntropyLoss(nn.Module):
-    """CrossEntropyLoss.
+    """CrossEntropyLoss with safety enhancement for CUDA memory access.
 
-    Args:
-        use_sigmoid (bool, optional): Whether the prediction uses sigmoid
-            of softmax. Defaults to False.
-        use_mask (bool, optional): Whether to use mask cross entropy loss.
-            Defaults to False.
-        reduction (str, optional): . Defaults to 'mean'.
-            Options are "none", "mean" and "sum".
-        class_weight (list[float] | str, optional): Weight of each class. If in
-            str format, read them from a file. Defaults to None.
-        loss_weight (float, optional): Weight of the loss. Defaults to 1.0.
-        loss_name (str, optional): Name of the loss item. If you want this loss
-            item to be included into the backward graph, `loss_` must be the
-            prefix of the name. Defaults to 'loss_ce'.
+    Enhanced features:
+    1. Tensor device unification (avoid CPU/GPU mix)
+    2. Illegal label value filtering
+    3. Memory contiguous guarantee
+    4. Dimension consistency check
     """
 
     def __init__(self,
@@ -161,7 +152,8 @@ class CrossEntropyLoss(nn.Module):
                  reduction='mean',
                  class_weight=None,
                  loss_weight=1.0,
-                 loss_name='loss_ce'):
+                 loss_name='loss_ce',
+                 ignore_index=255):  # 新增：默认忽略标签255
         super(CrossEntropyLoss, self).__init__()
         assert (use_sigmoid is False) or (use_mask is False)
         self.use_sigmoid = use_sigmoid
@@ -169,6 +161,7 @@ class CrossEntropyLoss(nn.Module):
         self.reduction = reduction
         self.loss_weight = loss_weight
         self.class_weight = get_class_weight(class_weight)
+        self.ignore_index = ignore_index  # 保存忽略标签值
 
         if self.use_sigmoid:
             self.cls_criterion = binary_cross_entropy
@@ -185,34 +178,31 @@ class CrossEntropyLoss(nn.Module):
                 avg_factor=None,
                 reduction_override=None,
                 **kwargs):
-        """Forward function."""
+        """Forward function with safety enhancement."""
         assert reduction_override in (None, 'none', 'mean', 'sum')
         reduction = (
             reduction_override if reduction_override else self.reduction)
+
+        # ========== 核心修复4：传递ignore_index到损失函数 ==========
+        if 'ignore_index' not in kwargs:
+            kwargs['ignore_index'] = self.ignore_index
+
+        # ========== 原有逻辑保留 ==========
         if self.class_weight is not None:
             class_weight = cls_score.new_tensor(self.class_weight)
         else:
             class_weight = None
+
         loss_cls = self.loss_weight * self.cls_criterion(
             cls_score,
             label,
             weight,
             class_weight=class_weight,
             reduction=reduction,
-            avg_factor=avg_factor,
-            **kwargs)
+            avg_factor=avg_factor, **kwargs)
         return loss_cls
 
     @property
     def loss_name(self):
-        """Loss Name.
-
-        This function must be implemented and will return the name of this
-        loss function. This name will be used to combine different loss items
-        by simple sum operation. In addition, if you want this loss item to be
-        included into the backward graph, `loss_` must be the prefix of the
-        name.
-        Returns:
-            str: The name of this loss item.
-        """
+        """Loss Name."""
         return self._loss_name
