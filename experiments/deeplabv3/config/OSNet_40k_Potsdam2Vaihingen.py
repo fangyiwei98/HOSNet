@@ -36,9 +36,7 @@ model = dict(
         norm_cfg=norm_cfg,
         align_corners=False,
         loss_decode=dict(
-            type='CrossEntropyLoss',
-            use_sigmoid=False,
-            loss_weight=1.0)),
+            type='CrossEntropyLoss', use_sigmoid=False, loss_weight=1.0, class_weight=[1.0, 1.0, 1.0, 1.25, 1.5])),
     decode_head_t=dict(
         type='DepthwiseSeparableASPPHead',
         in_channels=2048,
@@ -52,9 +50,7 @@ model = dict(
         norm_cfg=norm_cfg,
         align_corners=False,
         loss_decode=dict(
-            type='CrossEntropyLoss',
-            use_sigmoid=False,
-            loss_weight=1.0)),
+            type='CrossEntropyLoss', use_sigmoid=False, loss_weight=1.0, class_weight=[1.0, 1.0, 1.0, 1.25, 1.5, 1.5])),
     discriminator_s=dict(
         type='AdapSegDiscriminator',
         gan_loss=dict(
@@ -71,7 +67,7 @@ model = dict(
         decay=0.999,
         pseudo_threshold=0.975,
         pseudo_rare_threshold=0.8,
-        pseudo_class_weight=None,
+        pseudo_class_weight=[1.01, 1.01, 1.01, 1.01, 1.01, 1.01],
         backbone_EMA=dict(
                 type='ResNetV1c',
                 depth=50,
@@ -96,9 +92,8 @@ model = dict(
             norm_cfg=norm_cfg,
             align_corners=False,
             loss_decode=dict(
-                type='CrossEntropyLoss',
-                use_sigmoid=False,
-                loss_weight=1.0))
+                type='CrossEntropyLoss', use_sigmoid=False, loss_weight=1.0,
+                class_weight=[1.0, 1.0, 1.0, 1.25, 1.5, 1.5]))
     ),
     # model training and testing settings
     train_cfg=dict(),
@@ -129,6 +124,6 @@ data = dict(
 )
 total_iters = 40000
 checkpoint_config = dict(by_epoch=False, interval=5000)
-evaluation = dict(interval=5000, metric='mIoU', pre_eval=True)
+evaluation = dict(interval=2000, metric='mIoU', pre_eval=True)
 runner = None
 find_unused_parameters = True
