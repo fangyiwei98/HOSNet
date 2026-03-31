@@ -172,90 +172,70 @@ class OSNet(BaseSegmentor):
 
     # 生成伪标签
     def pseudo_label_generation_crossEMA(self, pred, dev=None):
-        # 1. 计算所有类别的 softmax 概率
+        # 1. 生成基本的伪标签
         pred_softmax = torch.softmax(pred, dim=1)
-
-        # 动态获取源域的类别数，作为共享类的数量
-        src_num_classes = self.decode_head_s.num_classes
-
-        # 提取共享类的概率分布
-        known_probs = pred_softmax[:, :src_num_classes, :, :]
-
-        # 获取共享类中的最大概率和对应的初始伪标签
-        max_known_prob, pseudo_label = torch.max(known_probs, dim=1)
-
-        # ================= 开放集挖掘逻辑 =================
-        # 设置开放集阈值 (超参数，建议在 0.4 到 0.6 之间微调)
-        open_set_threshold = 0.45
-
-        # 判定条件：如果像素在所有共享类上的最高概率都达不到阈值，则认为是目标域私有类
-        is_open_set = max_known_prob < open_set_threshold
-
-        # 将这些像素的伪标签强制修改为目标域特有类的索引 (例如 5)
-        pseudo_label[is_open_set] = src_num_classes
-
-        # 重新构建置信度矩阵 (pseudo_prob)
-        pseudo_prob = max_known_prob.clone()
-        # 对于被判定为未知类的像素，其置信度设为 (1.0 - max_known_prob)，
-        # 意味着它在共享类上的概率越低，我们越确信它是私有类
-        pseudo_prob[is_open_set] = 1.0 - max_known_prob[is_open_set]
-        # ==================================================
-
-        # 2. 阈值过滤与权重生成
-        # 此时的 pseudo_prob 包含了共享类的高置信度和私有类的高置信度
+        # 找到概率分布中最大值对应的类别索引，即伪标签
+        pseudo_prob, pseudo_label = torch.max(pred_softmax, dim=1)
+        # 判断哪些伪标签的概率大于或等于设定的阈值，并转换为长整型张量
         ps_large_p = pseudo_prob.ge(self.cross_EMA_pseu_thre).long() == 1
-
+        # 计算伪标签的总数量
         ps_size = np.size(np.array(pseudo_label.cpu()))
-        # 加上 1e-6 防止除以 0
-        pseudo_weight_ratio = torch.sum(ps_large_p).item() / (ps_size + 1e-6)
-
+        # 计算大于或等于阈值的伪标签的比例
+        pseudo_weight_ratio = torch.sum(ps_large_p).item() / ps_size
+        # 根据比例生成权重张量，所有元素初始化为权重比例值
         pseudo_weight = pseudo_weight_ratio * torch.ones(pseudo_prob.shape, device=dev)
-
-        # 3. 类别平衡策略 (保留你原有的优秀设计)
+        # 2. 应用类别平衡策略
+        # 2.1 如果设置了类别权重和稀有类别阈值
         if self.cross_EMA_pseu_cls_weight is not None and self.cross_EMA_rare_pseu_thre is not None:
+            # 判断哪些伪标签的概率大于或等于稀有类别阈值
             ps_large_p_rare = pseudo_prob.ge(self.cross_EMA_rare_pseu_thre).long() == 1
+            # 更新权重张量，只有大于或等于稀有类别阈值的伪标签才保留原有权重
             pseudo_weight = pseudo_weight * ps_large_p_rare
-
+            # 创建一个与伪标签形状相同的浮点数张量，用于存储类别权重
             pseudo_class_weight = copy.deepcopy(pseudo_label.float())
-
-            # 注意：确保配置文件中的 cross_EMA_pseu_cls_weight 列表长度等于目标域的总类别数 (6)
+            # 遍历类别权重列表，将对应类别的伪标签权重设置为类别权重值
             for i in range(len(self.cross_EMA_pseu_cls_weight)):
                 pseudo_class_weight[pseudo_class_weight == i] = self.cross_EMA_pseu_cls_weight[i]
-
+            # 更新权重张量，将类别权重与原有权重相乘
             pseudo_weight = pseudo_class_weight * pseudo_weight
+            # 如果权重为0，则设置为权重比例的0.5倍，避免权重完全为0
             pseudo_weight[pseudo_weight == 0] = pseudo_weight_ratio * 0.5
-
-        # 扩展维度以匹配损失计算的需求
+        # 将伪标签张量扩展一个维度，以便与某些模型或操作兼容
         pseudo_label = pseudo_label[:, None, :, :]
-
+        # 返回生成的伪标签和权重
         return pseudo_label, pseudo_weight
 
     # 使用cross_EMA生成伪标签
     def encode_decode_crossEMA(self, input=None, dev=None):
-        # 提取特征
-        #F_t = self.forward_backbone(self.backbone_s, input)
+        # 1. 提取特征
+        F_t = self.forward_backbone(self.backbone_s, input)
         F_ttea = self.forward_backbone(self.cross_EMA_backbone, input)
-
-        # 使用decode_head_t和cross_EMA_decoder对特征进行解码
-        #P_t = self.forward_decode_head(self.decode_head_t, F_t)
+        # 2. 解码得到预测
+        P_t = self.forward_decode_head(self.decode_head_s, F_t)
         P_ttea = self.forward_decode_head(self.cross_EMA_decoder, F_ttea)
+        # ================= 3. 跨维度逻辑融合 =================
+        # 前 5 类 (源域已知类)：取两者平均，融合源域基础知识与目标域教师知识
+        P_EMA_shared = (P_t + P_ttea[:, :5, :, :]) / 2.0
+        # 第 6 类 (目标域私有类 clutter)：源域一无所知，完全信任教师网络
+        P_EMA_private = P_ttea[:, 5:, :, :]
+        # 在通道维度 (dim=1) 拼接起来，重组为完整的 6 类预测矩阵
+        P_EMA = torch.cat([P_EMA_shared, P_EMA_private], dim=1)
+        # =====================================================
 
-        # 计算P_t2s和P_t的平均值，并调整到与输入图像相同的尺寸
-        #P_EMA = (P_t + P_ttea) / 2
-        P_EMA = P_ttea
-        P_EMA_KD=P_EMA.detach()
+        P_EMA_KD = P_EMA.detach()
+
+        # 调整尺寸
         P_EMA = resize(
             input=P_EMA,
             size=input.shape[2:],
             mode='bilinear',
             align_corners=self.align_corners)
 
-        #3. pseudo label generation
+        # 4. 生成伪标签
         P_EMA_detach = P_EMA.detach()
-        pseudo_label,pseudo_weight=self.pseudo_label_generation_crossEMA(P_EMA_detach, dev=dev)
+        pseudo_label, pseudo_weight = self.pseudo_label_generation_crossEMA(P_EMA_detach, dev=dev)
 
-        # 返回生成的伪标签和对应的权重
-        return pseudo_label, pseudo_weight,P_EMA_KD
+        return pseudo_label, pseudo_weight, P_EMA_KD
 
 
 
@@ -295,44 +275,68 @@ class OSNet(BaseSegmentor):
         x = self.backbone_s(img)
         return x
 
-    # 更新cross_EMA
+    #更新cross_EMA
     def _update_cross_EMA(self, iter):
         alpha_t = min(1 - 1 / (iter + 1), self.cross_EMA_alpha)
-
-        ## 1. 更新EMA Backbone（保持不变）
+        ## 1. update teacher_backbone
         for ema_b, target_b in zip(self.cross_EMA_backbone.parameters(), self.backbone_s.parameters()):
-            if ema_b.dim() == 0:
+            if not target_b.data.shape:
                 ema_b.data = alpha_t * ema_b.data + (1 - alpha_t) * target_b.data
             else:
-                ema_b.data[:] = alpha_t * ema_b.data + (1 - alpha_t) * target_b.data
+                ema_b.data[:] = alpha_t * ema_b.data[:] + (1 - alpha_t) * target_b.data[:]
 
-        ## 2. 更新EMA Decoder（融合源域与目标域的知识）
-        assert isinstance(self.cross_EMA_decoder, nn.Module), \
-            "self.cross_EMA_decoder must be a nn.Module"
-
-        src_num_classes = self.decode_head_s.num_classes  # 源域类别数 (例如 5)
-        ema_num_classes = self.cross_EMA_decoder.num_classes  # EMA类别数 (例如 6)
-
-        # 同时获取源域和目标域解码器的参数
-        src_params = list(self.decode_head_s.parameters())
-        tgt_params = list(self.decode_head_t.parameters())
-        ema_params = list(self.cross_EMA_decoder.parameters())
-
-        for idx, (ema_d, src_d, tgt_d) in enumerate(zip(ema_params, src_params, tgt_params)):
-            if ema_d.dim() == 0:
-                ema_d.data = alpha_t * ema_d.data + (1 - alpha_t) * src_d.data
+        ## 2. updata teacher_decoder(这里要用源域解码器更新)
+        for ema_d, target_d in zip(self.cross_EMA_decoder.parameters(), self.decode_head_t.parameters()):
+            ## For scalar params
+            if not target_d.data.shape:
+                ema_d.data = alpha_t * ema_d.data + (1 - alpha_t) * target_d.data
+            ## For tensor params
             else:
-                # 判定是否为输出层的分类权重/偏置 (维度0等于类别数)
-                if ema_d.shape[0] == ema_num_classes and src_d.shape[0] == src_num_classes:
-                    # 1. 共享类 (0 到 src_num_classes-1)：从源域解码器吸收稳定知识
-                    ema_d.data[:src_num_classes] = alpha_t * ema_d.data[:src_num_classes] + \
-                                                   (1 - alpha_t) * src_d.data[:src_num_classes]
-                    # 2. 目标域私有类 (src_num_classes 到 ema_num_classes-1)：从目标域解码器吸收新知识
-                    ema_d.data[src_num_classes:] = alpha_t * ema_d.data[src_num_classes:] + \
-                                                   (1 - alpha_t) * tgt_d.data[src_num_classes:]
-                else:
-                    # 对于非分类层的通用特征提取参数，依然跟从源域以保持基础语义提取能力
-                    ema_d.data[:] = alpha_t * ema_d.data + (1 - alpha_t) * src_d.data
+                ema_d.data[:] = alpha_t * ema_d.data[:] + (1 - alpha_t) * target_d.data[:]
+    # 更新cross_EMA
+    # def _update_cross_EMA(self, iter):
+    #     alpha_t = min(1 - 1 / (iter + 1), self.cross_EMA_alpha)
+    #
+    #     ## 1. 更新EMA Backbone（不变）
+    #     for ema_b, target_b in zip(self.cross_EMA_backbone.parameters(), self.backbone_s.parameters()):
+    #         if ema_b.dim() == 0:  # 标量参数（无维度）
+    #             ema_b.data = alpha_t * ema_b.data + (1 - alpha_t) * target_b.data
+    #         else:  # 张量参数
+    #             ema_b.data[:] = alpha_t * ema_b.data + (1 - alpha_t) * target_b.data
+    #
+    #     ## 2. 更新EMA Decoder（核心：适配源域动态类别数）
+    #     # 先确认cross_EMA_decoder是网络模块（而非整数）
+    #     assert isinstance(self.cross_EMA_decoder, nn.Module), \
+    #         "self.cross_EMA_decoder must be a nn.Module, not {}".format(type(self.cross_EMA_decoder))
+    #
+    #     # 关键：动态获取源域和解码器的类别数
+    #     src_num_classes = self.decode_head_s.num_classes  # 源域类别数（1/2/3/4/5）
+    #     ema_num_classes = self.cross_EMA_decoder.num_classes  # EMA解码器类别数（固定6）
+    #     # 校验类别数合法性
+    #     assert 1 <= src_num_classes <= ema_num_classes, \
+    #         f"源域类别数{src_num_classes}需满足 1 ≤ 类别数 ≤ EMA解码器类别数{ema_num_classes}"
+    #
+    #     # 遍历两个解码器的参数（按顺序匹配）
+    #     src_params = list(self.decode_head_s.parameters())
+    #     ema_params = list(self.cross_EMA_decoder.parameters())
+    #
+    #     # 确保参数数量匹配（除了最后一层类别数差异）
+    #     assert len(src_params) == len(ema_params), \
+    #         f"参数数量不匹配：decode_head_s有{len(src_params)}个参数，cross_EMA_decoder有{len(ema_params)}个参数"
+    #
+    #     for idx, (ema_d, target_d) in enumerate(zip(ema_params, src_params)):
+    #         if ema_d.dim() == 0:  # 标量参数
+    #             ema_d.data = alpha_t * ema_d.data + (1 - alpha_t) * target_d.data
+    #         else:  # 张量参数，动态处理类别数差异
+    #             # 仅处理「类别维度」的参数（shape[0]为类别数）
+    #             if ema_d.shape[0] == ema_num_classes and target_d.shape[0] == src_num_classes:
+    #                 # 动态更新：仅更新源域类别数范围内的参数，超出部分保留EMA原值
+    #                 ema_d.data[:src_num_classes] = alpha_t * ema_d.data[:src_num_classes] + \
+    #                                                (1 - alpha_t) * target_d.data[:src_num_classes]
+    #                 # 超出源域类别数的部分（如源域3类，EMA 6类，则4-6类）保持EMA原值，无需更新
+    #             else:
+    #                 # 非类别维度参数，正常EMA更新
+    #                 ema_d.data[:] = alpha_t * ema_d.data + (1 - alpha_t) * target_d.data
 
     # 编码和解码函数
     def encode_decode(self, img, img_metas):
