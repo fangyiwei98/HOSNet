@@ -215,7 +215,8 @@ class OSNet(BaseSegmentor):
         P_ttea = self.forward_decode_head(self.cross_EMA_decoder, F_ttea)
         # ================= 3. 跨维度逻辑融合 =================
         # 前 5 类 (源域已知类)：取两者平均，融合源域基础知识与目标域教师知识
-        P_EMA_shared = (P_t + P_ttea[:, :5, :, :]) / 2.0
+        #P_EMA_shared = (P_t + P_ttea[:, :5, :, :]) / 2.0
+        P_EMA_shared = P_t
         # 第 6 类 (目标域私有类 clutter)：源域一无所知，完全信任教师网络
         P_EMA_private = P_ttea[:, 5:, :, :]
         # 在通道维度 (dim=1) 拼接起来，重组为完整的 6 类预测矩阵
