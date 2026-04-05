@@ -91,7 +91,6 @@ class OSNet(BaseSegmentor):
         # 4. 计算源域损失
         loss_seg_s, log_vars_seg_s = self._get_segmentor_loss(self.decode_head_s, P_s,data_batch['gt_semantic_seg'])
         log_vars.update(log_vars_seg_s)
-        loss_seg = loss_seg_s
 
         # 5.计算目标域损失
         # 5.1生成伪标签
@@ -103,7 +102,7 @@ class OSNet(BaseSegmentor):
         log_vars_seg_t['loss_ce_seg_t'] = log_vars_seg_t.pop('loss')
         log_vars.update(log_vars_seg_t)
         # 计算总的分割损失loss_seg
-        loss_seg = loss_seg + self.cross_EMA_training_ratio * loss_seg_t
+        loss_seg = loss_seg_s + self.cross_EMA_training_ratio * loss_seg_t
         loss_seg.backward()
 
         optimizer['backbone_s'].step()
@@ -113,41 +112,6 @@ class OSNet(BaseSegmentor):
         self.set_requires_grad(self.decode_head_s, False)
         self.set_requires_grad(self.decode_head_t, False)
 
-        #=============第二阶段==================
-        ## 训练Ds
-        self.set_requires_grad(self.discriminator_s, True)
-        F_s = F_s[-1]
-        F_t = F_t[-1]
-        # 对F_s和F_t应用softmax函数，得到其在空间维度上的概率分布
-        F_s_dis_sm = self.sw_softmax(F_s)
-        F_t_dis_sm = self.sw_softmax(F_t)
-        F_s_dis_detach = F_s_dis_sm.detach()
-        F_t_dis_detach = F_t_dis_sm.detach()
-        F_s_dis_detach_oup = self.forward_discriminator(self.discriminator_s, F_s_dis_detach)
-        F_t_dis_detach_oup = self.forward_discriminator(self.discriminator_s, F_t_dis_detach)
-        F_s_dis_detach_oup = resize(
-            input=F_s_dis_detach_oup,
-            size=data_batch['img'].shape[2:],
-            mode='bilinear',
-            align_corners=self.align_corners)
-        F_t_dis_detach_oup = resize(
-            input=F_t_dis_detach_oup,
-            size=data_batch['B_img'].shape[2:],
-            mode='bilinear',
-            align_corners=self.align_corners)
-        loss_adv_s_ds, log_vars_adv_s_ds = self._get_gan_loss(self.discriminator_s, F_s_dis_detach_oup,
-                                                                  'F_s_ds', 1)
-        log_vars.update(log_vars_adv_s_ds)
-        loss_adv_t_ds, log_vars_adv_t_ds = self._get_gan_loss(self.discriminator_s, F_t_dis_detach_oup,
-                                                                  'F_t_ds', 0)
-        log_vars.update(log_vars_adv_t_ds)
-        loss_Ds=loss_adv_s_ds+loss_adv_t_ds
-
-        #判别器损失
-        loss_Ds.backward()
-        optimizer['discriminator_s'].step()
-
-        self.set_requires_grad(self.discriminator_s, False)
 
         # 将当前计算的分割损失值赋给loss变量
         loss = loss_seg
@@ -210,34 +174,45 @@ class OSNet(BaseSegmentor):
         # 1. 提取特征
         F_t = self.forward_backbone(self.backbone_s, input)
         F_ttea = self.forward_backbone(self.cross_EMA_backbone, input)
-        # 2. 解码得到预测
-        P_t = self.forward_decode_head(self.decode_head_s, F_t)
-        P_ttea = self.forward_decode_head(self.cross_EMA_decoder, F_ttea)
-        # ================= 3. 跨维度逻辑融合 =================
-        # 前 5 类 (源域已知类)：取两者平均，融合源域基础知识与目标域教师知识
-        #P_EMA_shared = (P_t + P_ttea[:, :5, :, :]) / 2.0
-        P_EMA_shared = P_t
-        # 第 6 类 (目标域私有类 clutter)：源域一无所知，完全信任教师网络
-        P_EMA_private = P_ttea[:, 5:, :, :]
-        # 在通道维度 (dim=1) 拼接起来，重组为完整的 6 类预测矩阵
-        P_EMA = torch.cat([P_EMA_shared, P_EMA_private], dim=1)
-        # =====================================================
 
-        P_EMA_KD = P_EMA.detach()
+        # 2. 解码得到预测 —— 都是【原始 logits】
+        P_t = self.forward_decode_head(self.decode_head_s, F_t)  # 学生：前5类 logits
+        P_ttea = self.forward_decode_head(self.cross_EMA_decoder, F_ttea)  # 教师：6类 logits
 
-        # 调整尺寸
-        P_EMA = resize(
-            input=P_EMA,
+        # ====================== 你的核心思路（正确版） ======================
+        # 1. 取前5类（源域已知类）：直接用学生解码器原始 logit
+        P_shared = P_t  # shape: (B, 5, H, W)
+
+        # 2. 取第6类（clutter）：用教师解码器第6类原始 logit
+        P_clutter = P_ttea[:, 5:, :, :]  # shape: (B, 1, H, W)
+
+        # 3. 拼接 → 得到完整6类 logits
+        P_ensemble = torch.cat([P_shared, P_clutter], dim=1)  # (B,6,H,W)
+
+        # 4. softmax 变成概率（归一化）
+        P_softmax = torch.softmax(P_ensemble, dim=1)
+
+        # 5. 【关键】转回 logit 空间（softmax → logit）
+        # 这样送入伪标签生成，模型能正常学习、反向传播
+        eps = 1e-8
+        P_final_logits = torch.log(torch.clamp(P_softmax, min=eps, max=1 - eps))
+
+        # ==================================================================
+
+        P_EMA_KD = P_final_logits.detach()
+
+        # 尺寸对齐
+        P_final_logits = resize(
+            input=P_final_logits,
             size=input.shape[2:],
             mode='bilinear',
             align_corners=self.align_corners)
 
-        # 4. 生成伪标签
-        P_EMA_detach = P_EMA.detach()
+        # 生成伪标签
+        P_EMA_detach = P_final_logits.detach()
         pseudo_label, pseudo_weight = self.pseudo_label_generation_crossEMA(P_EMA_detach, dev=dev)
 
         return pseudo_label, pseudo_weight, P_EMA_KD
-
 
 
     # 添加的cross_EMA相关的函数
@@ -286,7 +261,7 @@ class OSNet(BaseSegmentor):
             else:
                 ema_b.data[:] = alpha_t * ema_b.data[:] + (1 - alpha_t) * target_b.data[:]
 
-        ## 2. updata teacher_decoder(这里要用源域解码器更新)
+        ## 2. updata teacher_decoder
         for ema_d, target_d in zip(self.cross_EMA_decoder.parameters(), self.decode_head_t.parameters()):
             ## For scalar params
             if not target_d.data.shape:
@@ -294,50 +269,6 @@ class OSNet(BaseSegmentor):
             ## For tensor params
             else:
                 ema_d.data[:] = alpha_t * ema_d.data[:] + (1 - alpha_t) * target_d.data[:]
-    # 更新cross_EMA
-    # def _update_cross_EMA(self, iter):
-    #     alpha_t = min(1 - 1 / (iter + 1), self.cross_EMA_alpha)
-    #
-    #     ## 1. 更新EMA Backbone（不变）
-    #     for ema_b, target_b in zip(self.cross_EMA_backbone.parameters(), self.backbone_s.parameters()):
-    #         if ema_b.dim() == 0:  # 标量参数（无维度）
-    #             ema_b.data = alpha_t * ema_b.data + (1 - alpha_t) * target_b.data
-    #         else:  # 张量参数
-    #             ema_b.data[:] = alpha_t * ema_b.data + (1 - alpha_t) * target_b.data
-    #
-    #     ## 2. 更新EMA Decoder（核心：适配源域动态类别数）
-    #     # 先确认cross_EMA_decoder是网络模块（而非整数）
-    #     assert isinstance(self.cross_EMA_decoder, nn.Module), \
-    #         "self.cross_EMA_decoder must be a nn.Module, not {}".format(type(self.cross_EMA_decoder))
-    #
-    #     # 关键：动态获取源域和解码器的类别数
-    #     src_num_classes = self.decode_head_s.num_classes  # 源域类别数（1/2/3/4/5）
-    #     ema_num_classes = self.cross_EMA_decoder.num_classes  # EMA解码器类别数（固定6）
-    #     # 校验类别数合法性
-    #     assert 1 <= src_num_classes <= ema_num_classes, \
-    #         f"源域类别数{src_num_classes}需满足 1 ≤ 类别数 ≤ EMA解码器类别数{ema_num_classes}"
-    #
-    #     # 遍历两个解码器的参数（按顺序匹配）
-    #     src_params = list(self.decode_head_s.parameters())
-    #     ema_params = list(self.cross_EMA_decoder.parameters())
-    #
-    #     # 确保参数数量匹配（除了最后一层类别数差异）
-    #     assert len(src_params) == len(ema_params), \
-    #         f"参数数量不匹配：decode_head_s有{len(src_params)}个参数，cross_EMA_decoder有{len(ema_params)}个参数"
-    #
-    #     for idx, (ema_d, target_d) in enumerate(zip(ema_params, src_params)):
-    #         if ema_d.dim() == 0:  # 标量参数
-    #             ema_d.data = alpha_t * ema_d.data + (1 - alpha_t) * target_d.data
-    #         else:  # 张量参数，动态处理类别数差异
-    #             # 仅处理「类别维度」的参数（shape[0]为类别数）
-    #             if ema_d.shape[0] == ema_num_classes and target_d.shape[0] == src_num_classes:
-    #                 # 动态更新：仅更新源域类别数范围内的参数，超出部分保留EMA原值
-    #                 ema_d.data[:src_num_classes] = alpha_t * ema_d.data[:src_num_classes] + \
-    #                                                (1 - alpha_t) * target_d.data[:src_num_classes]
-    #                 # 超出源域类别数的部分（如源域3类，EMA 6类，则4-6类）保持EMA原值，无需更新
-    #             else:
-    #                 # 非类别维度参数，正常EMA更新
-    #                 ema_d.data[:] = alpha_t * ema_d.data + (1 - alpha_t) * target_d.data
 
     # 编码和解码函数
     def encode_decode(self, img, img_metas):
@@ -392,8 +323,6 @@ class OSNet(BaseSegmentor):
     # 获取分割损失
     def _get_segmentor_loss(self, decode_head, pred, gt_semantic_seg, gt_weight=None):
         losses = dict()
-        '''print("计算损失时特征图形状：")
-        print(pred.shape)'''
         loss_seg = decode_head.losses(pred, gt_semantic_seg, gt_weight=gt_weight)
         losses.update(loss_seg)
         loss_seg, log_vars_seg = self._parse_losses(losses)
