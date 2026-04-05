@@ -19,7 +19,6 @@ class OSNet(BaseSegmentor):
                  backbone_s,
                  decode_head_s,
                  decode_head_t,
-                 discriminator_s=None,
                  cross_EMA=None,
                  train_cfg=None,
                  test_cfg=None,
@@ -42,8 +41,6 @@ class OSNet(BaseSegmentor):
         self.train_cfg = train_cfg
         self.test_cfg = test_cfg
 
-        # 添加的判别器
-        self.discriminator_s = builder.build_discriminator(discriminator_s)
         # 添加的cross_EMA(跟配置里一样)
         if cross_EMA is not None:
             self.cross_EMA = cross_EMA
@@ -66,13 +63,11 @@ class OSNet(BaseSegmentor):
         optimizer['backbone_s'].zero_grad()
         optimizer['decode_head_s'].zero_grad()
         optimizer['decode_head_t'].zero_grad()
-        optimizer['discriminator_s'].zero_grad()
 
         # 设置一下组件参数为不可训练
         self.set_requires_grad(self.backbone_s, False)
         self.set_requires_grad(self.decode_head_s, False)
         self.set_requires_grad(self.decode_head_t, False)
-        self.set_requires_grad(self.discriminator_s, False)
         # 所有要发送给日志记录器的变量
         log_vars = dict()
         #需要训练的参数(需要训练的模块)
@@ -133,40 +128,51 @@ class OSNet(BaseSegmentor):
         # 返回封装好的信息字典
         return outputs
 
-
-    # 生成伪标签
+    # 生成伪标签 + 每隔100iter打印统计信息
     def pseudo_label_generation_crossEMA(self, pred, dev=None):
         # 1. 生成基本的伪标签
         pred_softmax = torch.softmax(pred, dim=1)
-        # 找到概率分布中最大值对应的类别索引，即伪标签
         pseudo_prob, pseudo_label = torch.max(pred_softmax, dim=1)
-        # 判断哪些伪标签的概率大于或等于设定的阈值，并转换为长整型张量
         ps_large_p = pseudo_prob.ge(self.cross_EMA_pseu_thre).long() == 1
-        # 计算伪标签的总数量
         ps_size = np.size(np.array(pseudo_label.cpu()))
-        # 计算大于或等于阈值的伪标签的比例
         pseudo_weight_ratio = torch.sum(ps_large_p).item() / ps_size
-        # 根据比例生成权重张量，所有元素初始化为权重比例值
         pseudo_weight = pseudo_weight_ratio * torch.ones(pseudo_prob.shape, device=dev)
+
+        # ===================== 每隔100 iteration 打印 =====================
+        if hasattr(self, 'iteration') and self.iteration % 100 == 0:
+            valid_num = torch.sum(ps_large_p).item()
+            total_num = ps_size
+            print(f"\n========== Iter {self.iteration} 伪标签统计 ==========")
+            print(f"总样本：{total_num} | 可信伪标签：{valid_num} | 生成比例：{pseudo_weight_ratio * 100:.2f}%")
+
+            # 各类别平均置信度（≈类别准确率）
+            pseudo_label_np = pseudo_label.cpu().numpy()
+            pseudo_prob_np = pseudo_prob.detach().cpu().numpy()
+            ps_large_p_np = ps_large_p.cpu().numpy()
+            valid_labels = pseudo_label_np[ps_large_p_np]
+            valid_probs = pseudo_prob_np[ps_large_p_np]
+
+            if len(valid_labels) > 0:
+                print("---------- 各类别置信度 ----------")
+                for cls in np.unique(valid_labels):
+                    cls_mask = valid_labels == cls
+                    cnt = np.sum(cls_mask)
+                    avg_prob = np.mean(valid_probs[cls_mask])
+                    print(f"类别 {cls:2d} | 数量：{cnt:4d} | 平均置信度：{avg_prob:.4f}")
+        # =================================================================
+
         # 2. 应用类别平衡策略
-        # 2.1 如果设置了类别权重和稀有类别阈值
         if self.cross_EMA_pseu_cls_weight is not None and self.cross_EMA_rare_pseu_thre is not None:
-            # 判断哪些伪标签的概率大于或等于稀有类别阈值
             ps_large_p_rare = pseudo_prob.ge(self.cross_EMA_rare_pseu_thre).long() == 1
-            # 更新权重张量，只有大于或等于稀有类别阈值的伪标签才保留原有权重
             pseudo_weight = pseudo_weight * ps_large_p_rare
-            # 创建一个与伪标签形状相同的浮点数张量，用于存储类别权重
             pseudo_class_weight = copy.deepcopy(pseudo_label.float())
-            # 遍历类别权重列表，将对应类别的伪标签权重设置为类别权重值
             for i in range(len(self.cross_EMA_pseu_cls_weight)):
                 pseudo_class_weight[pseudo_class_weight == i] = self.cross_EMA_pseu_cls_weight[i]
-            # 更新权重张量，将类别权重与原有权重相乘
             pseudo_weight = pseudo_class_weight * pseudo_weight
-            # 如果权重为0，则设置为权重比例的0.5倍，避免权重完全为0
             pseudo_weight[pseudo_weight == 0] = pseudo_weight_ratio * 0.5
-        # 将伪标签张量扩展一个维度，以便与某些模型或操作兼容
+
+        # 格式调整
         pseudo_label = pseudo_label[:, None, :, :]
-        # 返回生成的伪标签和权重
         return pseudo_label, pseudo_weight
 
     # 使用cross_EMA生成伪标签
@@ -214,8 +220,6 @@ class OSNet(BaseSegmentor):
 
         return pseudo_label, pseudo_weight, P_EMA_KD
 
-
-    # 添加的cross_EMA相关的函数
     def _init_cross_EMA(self, cfg):
         self.cross_EMA_type = cfg['type']
         self.cross_EMA_alpha = cfg['decay']
