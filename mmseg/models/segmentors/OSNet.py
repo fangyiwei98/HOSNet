@@ -130,9 +130,33 @@ class OSNet(BaseSegmentor):
 
     # 生成伪标签 + 每隔100iter打印统计信息
     def pseudo_label_generation_crossEMA(self, pred, dev=None):
-        # 1. 生成基本的伪标签
-        pred_softmax = torch.softmax(pred, dim=1)
-        pseudo_prob, pseudo_label = torch.max(pred_softmax, dim=1)
+        # pred 形状: (B, 6, H, W) → 0-4已知类，5=clutter未知类
+        pred_softmax = torch.softmax(pred, dim=1)  # (B,6,H,W)
+
+        # ===================== Open-Set 核心逻辑 =====================
+        # 1. 取出前5类（源域已知类）概率
+        pred_known = pred_softmax[:, :5, :, :]  # (B,5,H,W)
+
+        # 2. 每个像素：已知类的最大概率
+        max_known_prob, pseudo_label_known = torch.max(pred_known, dim=1)  # (B,H,W)
+
+        # 3. Open-Set 判断：所有已知类概率都 < 0.5 → 判为未知类（5）
+        open_set_mask = max_known_prob < 0.5  # True=不属于任何已知类
+
+        # 4. 生成最终伪标签
+        pseudo_label = pseudo_label_known.clone()
+        pseudo_label[open_set_mask] = 5  # 赋值为 clutter 未知类
+        # ============================================================
+
+        # 5. 置信度概率（用于阈值过滤）
+        # 对已知类：用自身概率；对未知类：用第6类概率
+        pseudo_prob = torch.where(
+            open_set_mask,
+            pred_softmax[:, 5, :, :],  # 未知类 → 取 clutter 概率
+            max_known_prob  # 已知类 → 取最大已知类概率
+        )
+
+        # 6. 高置信度掩码（cross_EMA_pseu_thre，默认0.975）
         ps_large_p = pseudo_prob.ge(self.cross_EMA_pseu_thre).long() == 1
         ps_size = np.size(np.array(pseudo_label.cpu()))
         pseudo_weight_ratio = torch.sum(ps_large_p).item() / ps_size
@@ -142,10 +166,13 @@ class OSNet(BaseSegmentor):
         if hasattr(self, 'iteration') and self.iteration % 100 == 0:
             valid_num = torch.sum(ps_large_p).item()
             total_num = ps_size
-            print(f"\n========== Iter {self.iteration} 伪标签统计 ==========")
-            print(f"总样本：{total_num} | 可信伪标签：{valid_num} | 生成比例：{pseudo_weight_ratio * 100:.2f}%")
+            open_set_pixel_num = torch.sum(open_set_mask).item()
 
-            # 各类别平均置信度（≈类别准确率）
+            print(f"\n========== Iter {self.iteration} Open-Set 伪标签统计 ==========")
+            print(f"总样本：{total_num} | 可信伪标签：{valid_num} | 生成比例：{pseudo_weight_ratio * 100:.2f}%")
+            print(f"【Open-Set】判定为未知类(clutter)像素数：{open_set_pixel_num} ({open_set_pixel_num / total_num * 100:.2f}%)")
+
+            # 各类别统计
             pseudo_label_np = pseudo_label.cpu().numpy()
             pseudo_prob_np = pseudo_prob.detach().cpu().numpy()
             ps_large_p_np = ps_large_p.cpu().numpy()
@@ -158,10 +185,11 @@ class OSNet(BaseSegmentor):
                     cls_mask = valid_labels == cls
                     cnt = np.sum(cls_mask)
                     avg_prob = np.mean(valid_probs[cls_mask])
-                    print(f"类别 {cls:2d} | 数量：{cnt:4d} | 平均置信度：{avg_prob:.4f}")
+                    cls_name = "clutter(未知)" if cls == 5 else f"类{cls}"
+                    print(f"类别 {cls:2d}({cls_name}) | 数量：{cnt:4d} | 平均置信度：{avg_prob:.4f}")
         # =================================================================
 
-        # 2. 应用类别平衡策略
+        # 7. 类别平衡权重（原逻辑保留不动）
         if self.cross_EMA_pseu_cls_weight is not None and self.cross_EMA_rare_pseu_thre is not None:
             ps_large_p_rare = pseudo_prob.ge(self.cross_EMA_rare_pseu_thre).long() == 1
             pseudo_weight = pseudo_weight * ps_large_p_rare
@@ -171,8 +199,8 @@ class OSNet(BaseSegmentor):
             pseudo_weight = pseudo_class_weight * pseudo_weight
             pseudo_weight[pseudo_weight == 0] = pseudo_weight_ratio * 0.5
 
-        # 格式调整
-        pseudo_label = pseudo_label[:, None, :, :]
+        # 格式调整 (B,H,W) → (B,1,H,W)
+        pseudo_label = pseudo_label.unsqueeze(1)
         return pseudo_label, pseudo_weight
 
     # 使用cross_EMA生成伪标签

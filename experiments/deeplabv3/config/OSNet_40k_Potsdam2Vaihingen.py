@@ -36,7 +36,8 @@ model = dict(
         norm_cfg=norm_cfg,
         align_corners=False,
         loss_decode=dict(
-            type='CrossEntropyLoss', use_sigmoid=False, loss_weight=1.0, class_weight=[1.0, 1.0, 1.0, 1.25, 1.5])),
+            type='CrossEntropyLoss', use_sigmoid=False, loss_weight=1.0, class_weight=[1.0, 1.0, 1.0, 1.25, 1.5])
+    ),
     decode_head_t=dict(
         type='DepthwiseSeparableASPPHead',
         in_channels=2048,
@@ -50,24 +51,15 @@ model = dict(
         norm_cfg=norm_cfg,
         align_corners=False,
         loss_decode=dict(
-            type='CrossEntropyLoss', use_sigmoid=False, loss_weight=1.0, class_weight=[1.0, 1.0, 1.0, 1.25, 1.5, 1.5])),
-    discriminator_s=dict(
-        type='AdapSegDiscriminator',
-        gan_loss=dict(
-            type='GANLoss',
-            gan_type='vanilla',
-            real_label_val=1.0,
-            fake_label_val=0.0,
-            loss_weight=0.005),
-        norm_cfg=dict(type='IN'),
-        in_channels=2048),
+            type='CrossEntropyLoss', use_sigmoid=False, loss_weight=1.0, class_weight=[1.0, 1.0, 1.0, 1.25, 1.5, 1.5])
+    ),
     cross_EMA = dict(
         type='decoder_only_t',
         training_ratio=0.25,
         decay=0.999,
         pseudo_threshold=0.975,
         pseudo_rare_threshold=0.8,
-        pseudo_class_weight=[1.01, 1.01, 1.01, 1.01, 1.01, 1.01],
+        pseudo_class_weight=[1.01, 1.01, 1.51, 1.51, 2.01, 2.01],
         backbone_EMA=dict(
                 type='ResNetV1c',
                 depth=50,
@@ -106,12 +98,11 @@ lr_config = dict(policy='poly', power=0.9, min_lr=1e-5, by_epoch=False)
 optimizer = dict(
     backbone_s=dict(type='SGD', lr=0.001, momentum=0.9, weight_decay=0.0005),
     decode_head_s=dict(type='SGD', lr=0.002, momentum=0.9, weight_decay=0.0005),
-    decode_head_t=dict(type='SGD', lr=0.002, momentum=0.9, weight_decay=0.0005),
-    discriminator_s=dict(type='Adam', lr=0.00025, betas=(0.9, 0.99))
+    decode_head_t=dict(type='SGD', lr=0.002, momentum=0.9, weight_decay=0.0005)
     )
 
 data = dict(
-    samples_per_gpu=4,
+    samples_per_gpu=8,
     workers_per_gpu=4,
     train=dict(
         source_included_classes=source_included_classes  # 同步类别列表到数据集
