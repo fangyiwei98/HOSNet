@@ -4,13 +4,17 @@ _base_ = [
 
 
 # 同步控制源域类别数和解码器num_classes！！！
-source_included_classes = ['impervious_surface', 'building', 'low_vegetation', 'tree', 'car']
+source_included_classes = ['impervious_surface', 'building', 'low_vegetation', 'car', 'clutter']
 target_included_classes = ['impervious_surface', 'building', 'low_vegetation', 'tree', 'car', 'clutter']
 
 
 norm_cfg = dict(type='SyncBN', requires_grad=True)
 model = dict(
     type='OSNet',
+    # --- 新增这两行 ---
+    source_classes=source_included_classes,
+    target_classes=target_included_classes,
+    # -----------------
     pretrained='open-mmlab://resnet50_v1c',
     backbone_s=dict(
         type='ResNetV1c',

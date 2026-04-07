@@ -44,10 +44,10 @@ class PVDataset_forAdap(CustomDataset):
         # 构建源域标签映射表：保留类→连续索引，排除类→ignore_label
         self.source_label_map = {}
         valid_idx = 0
+        # 修改映射：不压缩索引
         for cls_idx, cls_name in enumerate(self.FULL_CLASSES):
-            if cls_name in self.source_included_classes:
-                self.source_label_map[cls_idx] = valid_idx
-                valid_idx += 1
+            if cls_name in source_included_classes:
+                self.source_label_map[cls_idx] = cls_idx
             else:
                 self.source_label_map[cls_idx] = self.ignore_label
 

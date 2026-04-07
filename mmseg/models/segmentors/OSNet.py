@@ -19,29 +19,41 @@ class OSNet(BaseSegmentor):
                  backbone_s,
                  decode_head_s,
                  decode_head_t,
+                 source_classes=None,  # 新增
+                 target_classes=None,  # 新增
                  cross_EMA=None,
                  train_cfg=None,
                  test_cfg=None,
                  pretrained=None,
                  init_cfg=None):
         super(OSNet, self).__init__(init_cfg)
-        # 如果提供了预训练权重，则将其设置为backbone的预训练权重
+
+        # --- 新增：自适应类别通道映射逻辑 ---
+        assert source_classes is not None and target_classes is not None, "必须提供source_classes和target_classes!"
+        self.source_classes = source_classes
+        self.target_classes = target_classes
+
+        # 计算源域类别在目标域中的索引 (例如 [0, 2, 3, 4, 5])
+        known_indices = [target_classes.index(c) for c in source_classes]
+        # 计算未知类别在目标域中的索引 (例如 building 缺失，就是 [1])
+        unknown_indices = [i for i, c in enumerate(target_classes) if c not in source_classes]
+
+        # 注册为 buffer，这样它们会自动随着模型移动到 GPU 上
+        self.register_buffer('known_idx', torch.tensor(known_indices, dtype=torch.long))
+        self.register_buffer('unknown_idx', torch.tensor(unknown_indices, dtype=torch.long))
+        # ------------------------------------
+
         if pretrained is not None:
-            assert backbone_s.get('pretrained') is None, \
-                'both backbone_s and segmentor set pretrained weight'
+            assert backbone_s.get('pretrained') is None
             backbone_s.pretrained = pretrained
-        # 构建backbone和decode_head
         self.backbone_s = builder.build_backbone(backbone_s)
         self.decode_head_s = self._init_decode_head(decode_head_s)
         self.decode_head_t = self._init_decode_head(decode_head_t)
-        # 类别数是decode_head_t的类别数量
         self.num_classes = self.decode_head_t.num_classes
         self.align_corners = self.decode_head_t.align_corners
-        # 训练和测试配置
         self.train_cfg = train_cfg
         self.test_cfg = test_cfg
 
-        # 添加的cross_EMA(跟配置里一样)
         if cross_EMA is not None:
             self.cross_EMA = cross_EMA
             self._init_cross_EMA(self.cross_EMA)
@@ -128,68 +140,108 @@ class OSNet(BaseSegmentor):
         # 返回封装好的信息字典
         return outputs
 
-    # 生成伪标签 + 每隔100iter打印统计信息
+    # 使用cross_EMA生成伪标签
+    def encode_decode_crossEMA(self, input=None, dev=None):
+        F_t = self.forward_backbone(self.backbone_s, input)
+        F_ttea = self.forward_backbone(self.cross_EMA_backbone, input)
+
+        P_t = self.forward_decode_head(self.decode_head_s, F_t)  # 学生：N类 (例如5类)
+        P_ttea = self.forward_decode_head(self.cross_EMA_decoder, F_ttea)  # 教师：全类别 (例如6类)
+
+        # ====================== 自适应通道对齐 (核心修复) ======================
+        # 创建一个全空的目标域大小的 logit 张量
+        P_ensemble = torch.zeros_like(P_ttea)
+
+        # 将学生预测的已知类 logits，按正确的目标域索引填入
+        # P_t 的维度是 (B, 5, H, W)，self.known_idx 是 [0, 2, 3, 4, 5]
+        P_ensemble[:, self.known_idx, :, :] = P_t
+
+        # 将教师预测的未知类 logits，填入剩余的通道
+        if len(self.unknown_idx) > 0:
+            P_ensemble[:, self.unknown_idx, :, :] = P_ttea[:, self.unknown_idx, :, :]
+        # ==================================================================
+
+        P_softmax = torch.softmax(P_ensemble, dim=1)
+        eps = 1e-8
+        P_final_logits = torch.log(torch.clamp(P_softmax, min=eps, max=1 - eps))
+        P_EMA_KD = P_final_logits.detach()
+
+        P_final_logits = resize(
+            input=P_final_logits,
+            size=input.shape[2:],
+            mode='bilinear',
+            align_corners=self.align_corners)
+
+        P_EMA_detach = P_final_logits.detach()
+        pseudo_label, pseudo_weight = self.pseudo_label_generation_crossEMA(P_EMA_detach, dev=dev)
+
+        return pseudo_label, pseudo_weight, P_EMA_KD
+
+    # 生成伪标签【自适应版】
     def pseudo_label_generation_crossEMA(self, pred, dev=None):
-        # pred 形状: (B, 6, H, W) → 0-4已知类，5=clutter未知类
-        pred_softmax = torch.softmax(pred, dim=1)  # (B,6,H,W)
+        pred_softmax = torch.softmax(pred, dim=1)
 
-        # ===================== Open-Set 核心逻辑 =====================
-        # 1. 取出前5类（源域已知类）概率
-        pred_known = pred_softmax[:, :5, :, :]  # (B,5,H,W)
+        # 1. 获取所有已知类的概率并找到最大值
+        pred_known = pred_softmax[:, self.known_idx, :, :]
+        max_known_prob, max_known_local_idx = torch.max(pred_known, dim=1)
 
-        # 2. 每个像素：已知类的最大概率
-        max_known_prob, pseudo_label_known = torch.max(pred_known, dim=1)  # (B,H,W)
+        # 将局部索引 (0~4) 映射回全局目标域索引 (0,2,3,4,5)
+        pseudo_label = self.known_idx[max_known_local_idx]
 
-        # 3. Open-Set 判断：所有已知类概率都 < 0.5 → 判为未知类（5）
-        open_set_mask = max_known_prob < 0.5  # True=不属于任何已知类
+        # 2. Open-Set 判定：如果所有已知类的最大置信度都很低
+        open_set_mask = max_known_prob < 0.5
 
-        # 4. 生成最终伪标签
-        pseudo_label = pseudo_label_known.clone()
-        pseudo_label[open_set_mask] = 5  # 赋值为 clutter 未知类
-        # ============================================================
+        # 3. 如果判定为未知类，从未知类中寻找概率最大的作为最终标签
+        if len(self.unknown_idx) > 0:
+            pred_unknown = pred_softmax[:, self.unknown_idx, :, :]
+            max_unknown_prob, max_unknown_local_idx = torch.max(pred_unknown, dim=1)
+            best_unknown_label = self.unknown_idx[max_unknown_local_idx]
+        else:
+            # 兼容没有未知类的情况
+            max_unknown_prob = torch.zeros_like(max_known_prob)
+            best_unknown_label = pseudo_label
 
-        # 5. 置信度概率（用于阈值过滤）
-        # 对已知类：用自身概率；对未知类：用第6类概率
-        pseudo_prob = torch.where(
-            open_set_mask,
-            pred_softmax[:, 5, :, :],  # 未知类 → 取 clutter 概率
-            max_known_prob  # 已知类 → 取最大已知类概率
-        )
+        # 4. 根据 mask 合并标签和置信度
+        pseudo_label = torch.where(open_set_mask, best_unknown_label, pseudo_label)
+        pseudo_prob = torch.where(open_set_mask, max_unknown_prob, max_known_prob)
 
-        # 6. 高置信度掩码（cross_EMA_pseu_thre，默认0.975）
+        # 5. 高置信度掩码计算权重
         ps_large_p = pseudo_prob.ge(self.cross_EMA_pseu_thre).long() == 1
         ps_size = np.size(np.array(pseudo_label.cpu()))
-        pseudo_weight_ratio = torch.sum(ps_large_p).item() / ps_size
+        pseudo_weight_ratio = torch.sum(ps_large_p).item() / (ps_size + 1e-8)
         pseudo_weight = pseudo_weight_ratio * torch.ones(pseudo_prob.shape, device=dev)
 
-        # ===================== 每隔100 iteration 打印 =====================
+        # ===================== 【自适应日志打印】 =====================
         if hasattr(self, 'iteration') and self.iteration % 100 == 0:
             valid_num = torch.sum(ps_large_p).item()
             total_num = ps_size
-            open_set_pixel_num = torch.sum(open_set_mask).item()
+            unknown_pixel_num = torch.sum(open_set_mask).item()
 
-            print(f"\n========== Iter {self.iteration} Open-Set 伪标签统计 ==========")
-            print(f"总样本：{total_num} | 可信伪标签：{valid_num} | 生成比例：{pseudo_weight_ratio * 100:.2f}%")
-            print(f"【Open-Set】判定为未知类(clutter)像素数：{open_set_pixel_num} ({open_set_pixel_num / total_num * 100:.2f}%)")
+            print(f"\n========== Iter {self.iteration} 伪标签统计 ==========")
+            print(f"已知类: {self.source_classes}")
+            print(f"未知类: {[self.target_classes[i] for i in self.unknown_idx.cpu().numpy()]}")
+            print(f"总像素: {total_num} | 高置信度: {valid_num} | 有效比例: {pseudo_weight_ratio * 100:.2f}%")
+            print(f"🚨 判定为未知类: {unknown_pixel_num} ({unknown_pixel_num / total_num * 100:.2f}%)")
 
-            # 各类别统计
             pseudo_label_np = pseudo_label.cpu().numpy()
             pseudo_prob_np = pseudo_prob.detach().cpu().numpy()
             ps_large_p_np = ps_large_p.cpu().numpy()
             valid_labels = pseudo_label_np[ps_large_p_np]
-            valid_probs = pseudo_prob_np[ps_large_p_np]
 
             if len(valid_labels) > 0:
-                print("---------- 各类别置信度 ----------")
+                print("---------- 高置信度类别分布 ----------")
                 for cls in np.unique(valid_labels):
                     cls_mask = valid_labels == cls
                     cnt = np.sum(cls_mask)
-                    avg_prob = np.mean(valid_probs[cls_mask])
-                    cls_name = "clutter(未知)" if cls == 5 else f"类{cls}"
-                    print(f"类别 {cls:2d}({cls_name}) | 数量：{cnt:4d} | 平均置信度：{avg_prob:.4f}")
-        # =================================================================
+                    avg_prob = np.mean(pseudo_prob_np[ps_large_p_np][cls_mask])
 
-        # 7. 类别平衡权重（原逻辑保留不动）
+                    # 动态获取类别名称
+                    cls_name = self.target_classes[cls]
+                    mark = "🚨" if cls in self.unknown_idx else "✅"
+                    print(f"{mark} 类别 {cls} ({cls_name}) | 数量: {cnt} | 平均置信度: {avg_prob:.4f}")
+        # ==============================================================
+
+        # 类别权重处理（与原版保持一致）
         if self.cross_EMA_pseu_cls_weight is not None and self.cross_EMA_rare_pseu_thre is not None:
             ps_large_p_rare = pseudo_prob.ge(self.cross_EMA_rare_pseu_thre).long() == 1
             pseudo_weight = pseudo_weight * ps_large_p_rare
@@ -199,54 +251,8 @@ class OSNet(BaseSegmentor):
             pseudo_weight = pseudo_class_weight * pseudo_weight
             pseudo_weight[pseudo_weight == 0] = pseudo_weight_ratio * 0.5
 
-        # 格式调整 (B,H,W) → (B,1,H,W)
         pseudo_label = pseudo_label.unsqueeze(1)
         return pseudo_label, pseudo_weight
-
-    # 使用cross_EMA生成伪标签
-    def encode_decode_crossEMA(self, input=None, dev=None):
-        # 1. 提取特征
-        F_t = self.forward_backbone(self.backbone_s, input)
-        F_ttea = self.forward_backbone(self.cross_EMA_backbone, input)
-
-        # 2. 解码得到预测 —— 都是【原始 logits】
-        P_t = self.forward_decode_head(self.decode_head_s, F_t)  # 学生：前5类 logits
-        P_ttea = self.forward_decode_head(self.cross_EMA_decoder, F_ttea)  # 教师：6类 logits
-
-        # ====================== 你的核心思路（正确版） ======================
-        # 1. 取前5类（源域已知类）：直接用学生解码器原始 logit
-        P_shared = P_t  # shape: (B, 5, H, W)
-
-        # 2. 取第6类（clutter）：用教师解码器第6类原始 logit
-        P_clutter = P_ttea[:, 5:, :, :]  # shape: (B, 1, H, W)
-
-        # 3. 拼接 → 得到完整6类 logits
-        P_ensemble = torch.cat([P_shared, P_clutter], dim=1)  # (B,6,H,W)
-
-        # 4. softmax 变成概率（归一化）
-        P_softmax = torch.softmax(P_ensemble, dim=1)
-
-        # 5. 【关键】转回 logit 空间（softmax → logit）
-        # 这样送入伪标签生成，模型能正常学习、反向传播
-        eps = 1e-8
-        P_final_logits = torch.log(torch.clamp(P_softmax, min=eps, max=1 - eps))
-
-        # ==================================================================
-
-        P_EMA_KD = P_final_logits.detach()
-
-        # 尺寸对齐
-        P_final_logits = resize(
-            input=P_final_logits,
-            size=input.shape[2:],
-            mode='bilinear',
-            align_corners=self.align_corners)
-
-        # 生成伪标签
-        P_EMA_detach = P_final_logits.detach()
-        pseudo_label, pseudo_weight = self.pseudo_label_generation_crossEMA(P_EMA_detach, dev=dev)
-
-        return pseudo_label, pseudo_weight, P_EMA_KD
 
     def _init_cross_EMA(self, cfg):
         self.cross_EMA_type = cfg['type']
