@@ -3,10 +3,19 @@ _base_ = [
 ]
 
 
-# 同步控制源域类别数和解码器num_classes！！！
-source_included_classes = ['impervious_surface', 'building', 'low_vegetation', 'car', 'clutter']
-target_included_classes = ['impervious_surface', 'building', 'low_vegetation', 'tree', 'car', 'clutter']
+# 固定全量类别 + 对应权重（绝对顺序不变）
+FULL_CLASSES = ['impervious_surface', 'building', 'low_vegetation', 'tree', 'car', 'clutter']
+FULL_CLASS_WEIGHT = [1.0, 1.0, 1.0, 1.25, 1.5, 1.5]
 
+# 源域 / 目标域类别
+source_included_classes = ['impervious_surface', 'building',  'tree', 'car', 'clutter']
+target_included_classes = FULL_CLASSES
+
+# 🔥 自适应计算源域权重（自动匹配）
+class_weight_s = [
+    FULL_CLASS_WEIGHT[FULL_CLASSES.index(cls)]
+    for cls in source_included_classes
+]
 
 norm_cfg = dict(type='SyncBN', requires_grad=True)
 model = dict(
@@ -40,7 +49,7 @@ model = dict(
         norm_cfg=norm_cfg,
         align_corners=False,
         loss_decode=dict(
-            type='CrossEntropyLoss', use_sigmoid=False, loss_weight=1.0, class_weight=[1.0, 1.0, 1.0, 1.25, 1.5])
+            type='CrossEntropyLoss', use_sigmoid=False, loss_weight=1.0, class_weight=class_weight_s)
     ),
     decode_head_t=dict(
         type='DepthwiseSeparableASPPHead',
@@ -55,7 +64,7 @@ model = dict(
         norm_cfg=norm_cfg,
         align_corners=False,
         loss_decode=dict(
-            type='CrossEntropyLoss', use_sigmoid=False, loss_weight=1.0, class_weight=[1.0, 1.0, 1.0, 1.25, 1.5, 1.5])
+            type='CrossEntropyLoss', use_sigmoid=False, loss_weight=1.0, class_weight=FULL_CLASS_WEIGHT)
     ),
     cross_EMA = dict(
         type='decoder_only_t',
@@ -89,7 +98,7 @@ model = dict(
             align_corners=False,
             loss_decode=dict(
                 type='CrossEntropyLoss', use_sigmoid=False, loss_weight=1.0,
-                class_weight=[1.0, 1.0, 1.0, 1.25, 1.5, 1.5]))
+                class_weight=FULL_CLASS_WEIGHT))
     ),
     # model training and testing settings
     train_cfg=dict(),
