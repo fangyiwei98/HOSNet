@@ -28,20 +28,16 @@ class OSNet(BaseSegmentor):
                  init_cfg=None):
         super(OSNet, self).__init__(init_cfg)
 
-        # --- 新增：自适应类别通道映射逻辑 ---
         assert source_classes is not None and target_classes is not None, "必须提供source_classes和target_classes!"
         self.source_classes = source_classes
         self.target_classes = target_classes
 
-        # 计算源域类别在目标域中的索引 (例如 [0, 2, 3, 4, 5])
-        known_indices = [target_classes.index(c) for c in source_classes]
-        # 计算未知类别在目标域中的索引 (例如 building 缺失，就是 [1])
+        # source decoder 的压缩通道 -> target 全类别索引
+        source_to_target_indices = [target_classes.index(c) for c in source_classes]
         unknown_indices = [i for i, c in enumerate(target_classes) if c not in source_classes]
 
-        # 注册为 buffer，这样它们会自动随着模型移动到 GPU 上
-        self.register_buffer('known_idx', torch.tensor(known_indices, dtype=torch.long))
+        self.register_buffer('source_to_target_idx', torch.tensor(source_to_target_indices, dtype=torch.long))
         self.register_buffer('unknown_idx', torch.tensor(unknown_indices, dtype=torch.long))
-        # ------------------------------------
 
         if pretrained is not None:
             assert backbone_s.get('pretrained') is None
@@ -76,16 +72,8 @@ class OSNet(BaseSegmentor):
         optimizer['decode_head_s'].zero_grad()
         optimizer['decode_head_t'].zero_grad()
 
-        # 设置一下组件参数为不可训练
-        self.set_requires_grad(self.backbone_s, False)
-        self.set_requires_grad(self.decode_head_s, False)
-        self.set_requires_grad(self.decode_head_t, False)
         # 所有要发送给日志记录器的变量
         log_vars = dict()
-        #需要训练的参数(需要训练的模块)
-        self.set_requires_grad(self.backbone_s, True)
-        self.set_requires_grad(self.decode_head_s, True)
-        self.set_requires_grad(self.decode_head_t, True)
 
         #2.提取特征,img是源域图像,B_img是目标域图像
         F_s = self.forward_backbone(self.backbone_s, data_batch['img'])
@@ -115,9 +103,6 @@ class OSNet(BaseSegmentor):
         optimizer['backbone_s'].step()
         optimizer['decode_head_s'].step()
         optimizer['decode_head_t'].step()
-        self.set_requires_grad(self.backbone_s, False)
-        self.set_requires_grad(self.decode_head_s, False)
-        self.set_requires_grad(self.decode_head_t, False)
 
 
         # 将当前计算的分割损失值赋给loss变量
@@ -140,26 +125,20 @@ class OSNet(BaseSegmentor):
         # 返回封装好的信息字典
         return outputs
 
-    # 使用cross_EMA生成伪标签
     def encode_decode_crossEMA(self, input=None, dev=None):
         F_t = self.forward_backbone(self.backbone_s, input)
         F_ttea = self.forward_backbone(self.cross_EMA_backbone, input)
 
-        P_t = self.forward_decode_head(self.decode_head_s, F_t)  # 学生：N类 (例如5类)
-        P_ttea = self.forward_decode_head(self.cross_EMA_decoder, F_ttea)  # 教师：全类别 (例如6类)
+        P_t = self.forward_decode_head(self.decode_head_s, F_t)  # 学生：源域压缩类别
+        P_ttea = self.forward_decode_head(self.cross_EMA_decoder, F_ttea)  # 教师：目标域全类别
 
-        # ====================== 自适应通道对齐 (核心修复) ======================
-        # 创建一个全空的目标域大小的 logit 张量
         P_ensemble = torch.zeros_like(P_ttea)
 
-        # 将学生预测的已知类 logits，按正确的目标域索引填入
-        # P_t 的维度是 (B, 5, H, W)，self.known_idx 是 [0, 2, 3, 4, 5]
-        P_ensemble[:, self.known_idx, :, :] = P_t
+        # 将source压缩通道按类别语义填回target全类别空间
+        P_ensemble[:, self.source_to_target_idx, :, :] = P_t
 
-        # 将教师预测的未知类 logits，填入剩余的通道
         if len(self.unknown_idx) > 0:
             P_ensemble[:, self.unknown_idx, :, :] = P_ttea[:, self.unknown_idx, :, :]
-        # ==================================================================
 
         P_softmax = torch.softmax(P_ensemble, dim=1)
         eps = 1e-8
@@ -177,41 +156,34 @@ class OSNet(BaseSegmentor):
 
         return pseudo_label, pseudo_weight, P_EMA_KD
 
-    # 生成伪标签【自适应版】
     def pseudo_label_generation_crossEMA(self, pred, dev=None):
         pred_softmax = torch.softmax(pred, dim=1)
 
-        # 1. 获取所有已知类的概率并找到最大值
-        pred_known = pred_softmax[:, self.known_idx, :, :]
+        # 已知类来自 source decoder 的压缩类别，通过映射回到 target 全类别索引
+        pred_known = pred_softmax[:, self.source_to_target_idx, :, :]
         max_known_prob, max_known_local_idx = torch.max(pred_known, dim=1)
 
-        # 将局部索引 (0~4) 映射回全局目标域索引 (0,2,3,4,5)
-        pseudo_label = self.known_idx[max_known_local_idx]
+        # 局部source通道索引 -> target全局类别索引
+        pseudo_label = self.source_to_target_idx[max_known_local_idx]
 
-        # 2. Open-Set 判定：如果所有已知类的最大置信度都很低
         open_set_mask = max_known_prob < 0.5
 
-        # 3. 如果判定为未知类，从未知类中寻找概率最大的作为最终标签
         if len(self.unknown_idx) > 0:
             pred_unknown = pred_softmax[:, self.unknown_idx, :, :]
             max_unknown_prob, max_unknown_local_idx = torch.max(pred_unknown, dim=1)
             best_unknown_label = self.unknown_idx[max_unknown_local_idx]
         else:
-            # 兼容没有未知类的情况
             max_unknown_prob = torch.zeros_like(max_known_prob)
             best_unknown_label = pseudo_label
 
-        # 4. 根据 mask 合并标签和置信度
         pseudo_label = torch.where(open_set_mask, best_unknown_label, pseudo_label)
         pseudo_prob = torch.where(open_set_mask, max_unknown_prob, max_known_prob)
 
-        # 5. 高置信度掩码计算权重
         ps_large_p = pseudo_prob.ge(self.cross_EMA_pseu_thre).long() == 1
         ps_size = np.size(np.array(pseudo_label.cpu()))
         pseudo_weight_ratio = torch.sum(ps_large_p).item() / (ps_size + 1e-8)
         pseudo_weight = pseudo_weight_ratio * torch.ones(pseudo_prob.shape, device=dev)
 
-        # ===================== 【自适应日志打印】 =====================
         if hasattr(self, 'iteration') and self.iteration % 100 == 0:
             valid_num = torch.sum(ps_large_p).item()
             total_num = ps_size
@@ -235,13 +207,10 @@ class OSNet(BaseSegmentor):
                     cnt = np.sum(cls_mask)
                     avg_prob = np.mean(pseudo_prob_np[ps_large_p_np][cls_mask])
 
-                    # 动态获取类别名称
                     cls_name = self.target_classes[cls]
                     mark = "🚨" if cls in self.unknown_idx else "✅"
                     print(f"{mark} 类别 {cls} ({cls_name}) | 数量: {cnt} | 平均置信度: {avg_prob:.4f}")
-        # ==============================================================
 
-        # 类别权重处理（与原版保持一致）
         if self.cross_EMA_pseu_cls_weight is not None and self.cross_EMA_rare_pseu_thre is not None:
             ps_large_p_rare = pseudo_prob.ge(self.cross_EMA_rare_pseu_thre).long() == 1
             pseudo_weight = pseudo_weight * ps_large_p_rare
