@@ -8,7 +8,7 @@ FULL_CLASSES = ['impervious_surface', 'building', 'low_vegetation', 'tree', 'car
 FULL_CLASS_WEIGHT = [1.0, 1.0, 1.0, 1.25, 1.5, 1.5]
 
 # 源域 / 目标域类别
-source_included_classes = ['impervious_surface', 'building',  'tree', 'car', 'clutter']
+source_included_classes = ['impervious_surface', 'low_vegetation',  'tree', 'car', 'clutter']
 target_included_classes = FULL_CLASSES
 
 # 🔥 自适应计算源域权重（自动匹配）
@@ -68,7 +68,7 @@ model = dict(
     ),
     cross_EMA = dict(
         type='decoder_only_t',
-        training_ratio=0.25,
+        training_ratio=1,
         decay=0.999,
         pseudo_threshold=0.975,
         pseudo_rare_threshold=0.8,

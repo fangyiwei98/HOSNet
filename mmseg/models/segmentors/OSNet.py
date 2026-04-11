@@ -140,13 +140,10 @@ class OSNet(BaseSegmentor):
         if len(self.unknown_idx) > 0:
             P_ensemble[:, self.unknown_idx, :, :] = P_ttea[:, self.unknown_idx, :, :]
 
-        P_softmax = torch.softmax(P_ensemble, dim=1)
-        eps = 1e-8
-        P_final_logits = torch.log(torch.clamp(P_softmax, min=eps, max=1 - eps))
-        P_EMA_KD = P_final_logits.detach()
+        P_EMA_KD = P_ensemble.detach()
 
         P_final_logits = resize(
-            input=P_final_logits,
+            input=P_ensemble,
             size=input.shape[2:],
             mode='bilinear',
             align_corners=self.align_corners)
@@ -156,71 +153,39 @@ class OSNet(BaseSegmentor):
 
         return pseudo_label, pseudo_weight, P_EMA_KD
 
+    # 生成伪标签
     def pseudo_label_generation_crossEMA(self, pred, dev=None):
+        # 1. 生成基本的伪标签
         pred_softmax = torch.softmax(pred, dim=1)
-
-        # 已知类来自 source decoder 的压缩类别，通过映射回到 target 全类别索引
-        pred_known = pred_softmax[:, self.source_to_target_idx, :, :]
-        max_known_prob, max_known_local_idx = torch.max(pred_known, dim=1)
-
-        # 局部source通道索引 -> target全局类别索引
-        pseudo_label = self.source_to_target_idx[max_known_local_idx]
-
-        open_set_mask = max_known_prob < 0.5
-
-        if len(self.unknown_idx) > 0:
-            pred_unknown = pred_softmax[:, self.unknown_idx, :, :]
-            max_unknown_prob, max_unknown_local_idx = torch.max(pred_unknown, dim=1)
-            best_unknown_label = self.unknown_idx[max_unknown_local_idx]
-        else:
-            max_unknown_prob = torch.zeros_like(max_known_prob)
-            best_unknown_label = pseudo_label
-
-        pseudo_label = torch.where(open_set_mask, best_unknown_label, pseudo_label)
-        pseudo_prob = torch.where(open_set_mask, max_unknown_prob, max_known_prob)
-
+        # 找到概率分布中最大值对应的类别索引，即伪标签
+        pseudo_prob, pseudo_label = torch.max(pred_softmax, dim=1)
+        # 判断哪些伪标签的概率大于或等于设定的阈值，并转换为长整型张量
         ps_large_p = pseudo_prob.ge(self.cross_EMA_pseu_thre).long() == 1
+        # 计算伪标签的总数量
         ps_size = np.size(np.array(pseudo_label.cpu()))
-        pseudo_weight_ratio = torch.sum(ps_large_p).item() / (ps_size + 1e-8)
+        # 计算大于或等于阈值的伪标签的比例
+        pseudo_weight_ratio = torch.sum(ps_large_p).item() / ps_size
+        # 根据比例生成权重张量，所有元素初始化为权重比例值
         pseudo_weight = pseudo_weight_ratio * torch.ones(pseudo_prob.shape, device=dev)
-
-        if hasattr(self, 'iteration') and self.iteration % 100 == 0:
-            valid_num = torch.sum(ps_large_p).item()
-            total_num = ps_size
-            unknown_pixel_num = torch.sum(open_set_mask).item()
-
-            print(f"\n========== Iter {self.iteration} 伪标签统计 ==========")
-            print(f"已知类: {self.source_classes}")
-            print(f"未知类: {[self.target_classes[i] for i in self.unknown_idx.cpu().numpy()]}")
-            print(f"总像素: {total_num} | 高置信度: {valid_num} | 有效比例: {pseudo_weight_ratio * 100:.2f}%")
-            print(f"🚨 判定为未知类: {unknown_pixel_num} ({unknown_pixel_num / total_num * 100:.2f}%)")
-
-            pseudo_label_np = pseudo_label.cpu().numpy()
-            pseudo_prob_np = pseudo_prob.detach().cpu().numpy()
-            ps_large_p_np = ps_large_p.cpu().numpy()
-            valid_labels = pseudo_label_np[ps_large_p_np]
-
-            if len(valid_labels) > 0:
-                print("---------- 高置信度类别分布 ----------")
-                for cls in np.unique(valid_labels):
-                    cls_mask = valid_labels == cls
-                    cnt = np.sum(cls_mask)
-                    avg_prob = np.mean(pseudo_prob_np[ps_large_p_np][cls_mask])
-
-                    cls_name = self.target_classes[cls]
-                    mark = "🚨" if cls in self.unknown_idx else "✅"
-                    print(f"{mark} 类别 {cls} ({cls_name}) | 数量: {cnt} | 平均置信度: {avg_prob:.4f}")
-
+        # 2. 应用类别平衡策略
+        # 2.1 如果设置了类别权重和稀有类别阈值
         if self.cross_EMA_pseu_cls_weight is not None and self.cross_EMA_rare_pseu_thre is not None:
+            # 判断哪些伪标签的概率大于或等于稀有类别阈值
             ps_large_p_rare = pseudo_prob.ge(self.cross_EMA_rare_pseu_thre).long() == 1
+            # 更新权重张量，只有大于或等于稀有类别阈值的伪标签才保留原有权重
             pseudo_weight = pseudo_weight * ps_large_p_rare
+            # 创建一个与伪标签形状相同的浮点数张量，用于存储类别权重
             pseudo_class_weight = copy.deepcopy(pseudo_label.float())
+            # 遍历类别权重列表，将对应类别的伪标签权重设置为类别权重值
             for i in range(len(self.cross_EMA_pseu_cls_weight)):
                 pseudo_class_weight[pseudo_class_weight == i] = self.cross_EMA_pseu_cls_weight[i]
+            # 更新权重张量，将类别权重与原有权重相乘
             pseudo_weight = pseudo_class_weight * pseudo_weight
+            # 如果权重为0，则设置为权重比例的0.5倍，避免权重完全为0
             pseudo_weight[pseudo_weight == 0] = pseudo_weight_ratio * 0.5
-
-        pseudo_label = pseudo_label.unsqueeze(1)
+        # 将伪标签张量扩展一个维度，以便与某些模型或操作兼容
+        pseudo_label = pseudo_label[:, None, :, :]
+        # 返回生成的伪标签和权重
         return pseudo_label, pseudo_weight
 
     def _init_cross_EMA(self, cfg):
@@ -317,10 +282,6 @@ class OSNet(BaseSegmentor):
         Pred = decode_head(feature)
         return Pred
 
-    # 构建判别器的前向传播
-    def forward_discriminator(self, discriminator, seg_pred):
-        dis_pred = discriminator(seg_pred)
-        return dis_pred
 
     # 训练前向传播函数
     def forward_train(self, img, B_img):
@@ -335,12 +296,6 @@ class OSNet(BaseSegmentor):
         loss_seg, log_vars_seg = self._parse_losses(losses)
         return loss_seg, log_vars_seg
 
-    # 获取对抗损失
-    def _get_gan_loss(self, discriminator, pred, domain, target_is_real):
-        losses = dict()
-        losses[f'loss_gan_{domain}'] = discriminator.gan_loss(pred, target_is_real)
-        loss_dis, log_vars_dis = self._parse_losses(losses)
-        return loss_dis, log_vars_dis
 
     # 获取KD损失
     def _get_KD_loss(self, teacher, student, pred_name, T=3):
