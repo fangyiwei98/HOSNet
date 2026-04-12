@@ -8,6 +8,7 @@ from .transforms import (CLAHE, AdjustGamma, Normalize, Pad,
                          PhotoMetricDistortion, RandomCrop, RandomCutOut,
                          RandomFlip, RandomMosaic, RandomRotate, Rerange,
                          Resize, RGB2Gray, SegRescale)
+from .pv_label_map import MapPVLabelTrain, MapPVLabelEval
 
 __all__ = [
     'Compose', 'to_tensor', 'ToTensor', 'ImageToTensor', 'ToDataContainer',
@@ -15,5 +16,6 @@ __all__ = [
     'MultiScaleFlipAug', 'Resize', 'RandomFlip', 'Pad', 'RandomCrop',
     'Normalize', 'SegRescale', 'PhotoMetricDistortion', 'RandomRotate',
     'AdjustGamma', 'CLAHE', 'Rerange', 'RGB2Gray', 'RandomCutOut',
-    'RandomMosaic', 'LoadImageFromFile_forAdap'
+    'RandomMosaic', 'LoadImageFromFile_forAdap',
+    'MapPVLabelTrain', 'MapPVLabelEval'
 ]
