@@ -9,7 +9,6 @@ img_norm_cfg = dict(
 
 crop_size = (384, 384)
 
-# 这里只是base配置，真正的source_included_classes会在上层配置覆盖
 default_source_classes = [
     'impervious_surface', 'building', 'low_vegetation',
     'tree', 'car', 'clutter'
@@ -29,11 +28,8 @@ train_pipeline = [
     dict(type='Collect', keys=['img', 'B_img', 'gt_semantic_seg']),
 ]
 
-# val/test若要评估mIoU，必须读取annotation并映射到0~5
 test_pipeline = [
     dict(type='LoadImageFromFile'),
-    dict(type='LoadAnnotations', reduce_zero_label=False),
-    dict(type='MapPVLabelEval', ignore_label=255),
     dict(
         type='MultiScaleFlipAug',
         img_scale=(512, 512),
@@ -43,7 +39,7 @@ test_pipeline = [
             dict(type='RandomFlip'),
             dict(type='Normalize', **img_norm_cfg),
             dict(type='ImageToTensor', keys=['img']),
-            dict(type='Collect', keys=['img', 'gt_semantic_seg']),
+            dict(type='Collect', keys=['img']),
         ])
 ]
 

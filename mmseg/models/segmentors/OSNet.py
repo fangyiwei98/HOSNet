@@ -172,80 +172,70 @@ class OSNet(BaseSegmentor):
     def pseudo_label_generation_crossEMA(self, pred, dev=None):
         pred_softmax = torch.softmax(pred, dim=1)
 
-        # 已知类 logits/prob 来自 source压缩通道映射到target类别后的那些通道
-        pred_known = pred_softmax[:, self.source_to_target_idx, :, :]
-        max_known_prob, max_known_local_idx = torch.max(pred_known, dim=1)
+        # closed-set: 没有未知类
+        if len(self.unknown_idx) == 0:
+            pseudo_prob, pseudo_label = torch.max(pred_softmax, dim=1)
+            open_set_mask = torch.zeros_like(pseudo_prob, dtype=torch.bool)
+        else:
+            # open-set: 已知类最大概率
+            pred_known = pred_softmax[:, self.source_to_target_idx, :, :]
+            max_known_prob, max_known_local_idx = torch.max(pred_known, dim=1)
 
-        # source局部通道索引 -> target全局类别索引
-        pseudo_label = self.source_to_target_idx[max_known_local_idx]
+            # 局部source类索引 -> target全类别索引
+            pseudo_label = self.source_to_target_idx[max_known_local_idx]
 
-        # open-set判定
-        open_set_mask = max_known_prob < 0.5
+            # 低置信度区域转未知类竞争
+            open_set_mask = max_known_prob < 0.5
 
-        # unknown类别只从unknown通道中选
-        if len(self.unknown_idx) > 0:
             pred_unknown = pred_softmax[:, self.unknown_idx, :, :]
             max_unknown_prob, max_unknown_local_idx = torch.max(pred_unknown, dim=1)
             best_unknown_label = self.unknown_idx[max_unknown_local_idx]
-        else:
-            max_unknown_prob = torch.zeros_like(max_known_prob)
-            best_unknown_label = pseudo_label
 
-        pseudo_label = torch.where(open_set_mask, best_unknown_label, pseudo_label)
-        pseudo_prob = torch.where(open_set_mask, max_unknown_prob, max_known_prob)
+            pseudo_label = torch.where(open_set_mask, best_unknown_label, pseudo_label)
+            pseudo_prob = torch.where(open_set_mask, max_unknown_prob, max_known_prob)
 
-        # 高置信度区域比例
-        ps_large_p = pseudo_prob.ge(self.cross_EMA_pseu_thre)
-        ps_size = pseudo_label.numel()
-        pseudo_weight_ratio = ps_large_p.float().sum().item() / (ps_size + 1e-8)
+        ps_large_p = pseudo_prob.ge(self.cross_EMA_pseu_thre).long() == 1
+        ps_size = np.size(np.array(pseudo_label.cpu()))
+        pseudo_weight_ratio = torch.sum(ps_large_p).item() / (ps_size + 1e-8)
+        pseudo_weight = pseudo_weight_ratio * torch.ones(pseudo_prob.shape, device=dev)
 
-        pseudo_weight = pseudo_weight_ratio * torch.ones(
-            pseudo_prob.shape, device=dev, dtype=torch.float32)
-
-        # 日志打印
         if hasattr(self, 'iteration') and self.iteration % 100 == 0:
-            valid_num = ps_large_p.float().sum().item()
+            valid_num = torch.sum(ps_large_p).item()
             total_num = ps_size
-            unknown_pixel_num = open_set_mask.float().sum().item()
+            unknown_pixel_num = torch.sum(open_set_mask).item()
 
             print(f"\n========== Iter {self.iteration} 伪标签统计 ==========")
             print(f"已知类: {self.source_classes}")
             print(f"未知类: {[self.target_classes[i] for i in self.unknown_idx.cpu().numpy()]}")
-            print(f"总像素: {total_num} | 高置信度: {int(valid_num)} | 有效比例: {pseudo_weight_ratio * 100:.2f}%")
-            print(f"🚨 判定为未知类: {int(unknown_pixel_num)} ({unknown_pixel_num / total_num * 100:.2f}%)")
+            print(f"总像素: {total_num} | 高置信度: {valid_num} | 有效比例: {pseudo_weight_ratio * 100:.2f}%")
+            print(f"🚨 判定为未知类: {unknown_pixel_num} ({unknown_pixel_num / total_num * 100:.2f}%)")
 
-            pseudo_label_np = pseudo_label.detach().cpu().numpy()
+            pseudo_label_np = pseudo_label.cpu().numpy()
             pseudo_prob_np = pseudo_prob.detach().cpu().numpy()
-            ps_large_p_np = ps_large_p.detach().cpu().numpy()
+            ps_large_p_np = ps_large_p.cpu().numpy()
             valid_labels = pseudo_label_np[ps_large_p_np]
 
             if len(valid_labels) > 0:
                 print("---------- 高置信度类别分布 ----------")
-                valid_probs = pseudo_prob_np[ps_large_p_np]
                 for cls in np.unique(valid_labels):
                     cls_mask = valid_labels == cls
                     cnt = np.sum(cls_mask)
-                    avg_prob = np.mean(valid_probs[cls_mask])
+                    avg_prob = np.mean(pseudo_prob_np[ps_large_p_np][cls_mask])
 
-                    cls_name = self.target_classes[int(cls)]
-                    mark = "🚨" if int(cls) in self.unknown_idx.cpu().numpy().tolist() else "✅"
-                    print(f"{mark} 类别 {int(cls)} ({cls_name}) | 数量: {cnt} | 平均置信度: {avg_prob:.4f}")
+                    cls_name = self.target_classes[cls]
+                    mark = "🚨" if cls in self.unknown_idx else "✅"
+                    print(f"{mark} 类别 {cls} ({cls_name}) | 数量: {cnt} | 平均置信度: {avg_prob:.4f}")
 
-        # 类别权重
         if self.cross_EMA_pseu_cls_weight is not None and self.cross_EMA_rare_pseu_thre is not None:
-            ps_large_p_rare = pseudo_prob.ge(self.cross_EMA_rare_pseu_thre).float()
+            ps_large_p_rare = pseudo_prob.ge(self.cross_EMA_rare_pseu_thre).long() == 1
             pseudo_weight = pseudo_weight * ps_large_p_rare
-
-            # 安全写法，避免原地替换造成潜在错误
-            pseudo_class_weight = torch.ones_like(
-                pseudo_label, dtype=torch.float32, device=pseudo_label.device)
-            for i, w in enumerate(self.cross_EMA_pseu_cls_weight):
-                pseudo_class_weight[pseudo_label == i] = float(w)
-
+            pseudo_class_weight = copy.deepcopy(pseudo_label.float())
+            for i in range(len(self.cross_EMA_pseu_cls_weight)):
+                pseudo_class_weight[pseudo_class_weight == i] = self.cross_EMA_pseu_cls_weight[i]
             pseudo_weight = pseudo_class_weight * pseudo_weight
             pseudo_weight[pseudo_weight == 0] = pseudo_weight_ratio * 0.5
 
-        pseudo_label = pseudo_label.unsqueeze(1)  # [B,1,H,W]
+        pseudo_label = pseudo_label.unsqueeze(1)
         return pseudo_label, pseudo_weight
 
     def _init_cross_EMA(self, cfg):
