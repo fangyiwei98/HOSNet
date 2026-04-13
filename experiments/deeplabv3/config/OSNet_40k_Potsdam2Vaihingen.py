@@ -4,7 +4,7 @@ _base_ = [
 ]
 
 source_included_classes = [
-    'impervious_surface', 'building', 'low_vegetation',
+    'impervious_surface', 'low_vegetation',
     'tree', 'car', 'clutter'
 ]
 target_included_classes = [
@@ -41,14 +41,14 @@ model = dict(
         c1_in_channels=256,
         c1_channels=48,
         dropout_ratio=0.1,
-        num_classes=6,
+        num_classes=len(source_included_classes),  # 动态计算类别数
         norm_cfg=norm_cfg,
         align_corners=False,
         loss_decode=dict(
             type='CrossEntropyLoss',
             use_sigmoid=False,
             loss_weight=1.0,
-            class_weight=[1.0, 1.0, 1.0, 1.25, 1.5, 1.5])
+            class_weight=[1.0,  1.0, 1.25, 1.5, 1.5])
     ),
 
     decode_head_t=dict(
@@ -60,7 +60,7 @@ model = dict(
         c1_in_channels=256,
         c1_channels=48,
         dropout_ratio=0.1,
-        num_classes=6,
+        num_classes=len(target_included_classes),
         norm_cfg=norm_cfg,
         align_corners=False,
         loss_decode=dict(
@@ -97,7 +97,7 @@ model = dict(
             c1_in_channels=256,
             c1_channels=48,
             dropout_ratio=0.1,
-            num_classes=6,
+            num_classes=len(target_included_classes),
             norm_cfg=norm_cfg,
             align_corners=False,
             loss_decode=dict(
