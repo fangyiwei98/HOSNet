@@ -1,17 +1,47 @@
 _base_ = [
-    '../../../configs/_base_/datasets/V2P.py', '../../../configs/_base_/default_runtime.py',
+    '../../../configs/_base_/datasets/V2P.py',
+    '../../../configs/_base_/default_runtime.py',
 ]
 
 
-# 同步控制源域类别数和解码器num_classes！！！
-source_included_classes = ['impervious_surface', 'building', 'low_vegetation', 'tree', 'car']
-target_included_classes = ['impervious_surface', 'building', 'low_vegetation', 'tree', 'car', 'clutter']
+source_included_classes = [
+    'impervious_surface', 'building', 'low_vegetation',
+    'tree', 'car'
+]
+target_included_classes = [
+    'impervious_surface', 'building', 'low_vegetation',
+    'tree', 'car', 'clutter'
+]
+
+FULL_CLASS_WEIGHT = {
+    'impervious_surface': 1.0,
+    'building': 1.0,
+    'low_vegetation': 1.0,
+    'tree': 1.25,
+    'car': 1.5,
+    'clutter': 1.5,
+}
+source_class_weight = [FULL_CLASS_WEIGHT[c] for c in source_included_classes]
+target_class_weight = [FULL_CLASS_WEIGHT[c] for c in target_included_classes]
+
+FULL_PSEUDO_WEIGHT = {
+    'impervious_surface': 1.01,
+    'building': 1.01,
+    'low_vegetation': 1.51,
+    'tree': 1.51,
+    'car': 2.01,
+    'clutter': 2.01,
+}
+target_pseudo_class_weight = [FULL_PSEUDO_WEIGHT[c] for c in target_included_classes]
+
 
 
 # model settings
 norm_cfg = dict(type='SyncBN', requires_grad=True)
 model = dict(
     type='OSNet',
+    source_classes=source_included_classes,
+    target_classes=target_included_classes,
     pretrained=None,
     backbone_s=dict(
         type='MixVisionTransformer',
@@ -39,11 +69,11 @@ model = dict(
         num_classes=len(source_included_classes),  # 动态计算类别数
         norm_cfg=norm_cfg,
         align_corners=False,
-        ignore_index=255,
         loss_decode=dict(
             type='CrossEntropyLoss',
             use_sigmoid=False,
-            loss_weight=1.0)),
+            loss_weight=1.0,
+            class_weight=source_class_weight)),
     # ------------------- 目标域解码器（保留全类别） -------------------
     decode_head_t=dict(
         type='SegformerHead',
@@ -51,26 +81,14 @@ model = dict(
         in_index=[0, 1, 2, 3],
         channels=256,
         dropout_ratio=0.1,
-        num_classes=6,
+        num_classes=len(target_included_classes),
         norm_cfg=norm_cfg,
         align_corners=False,
-        ignore_index=255,
         loss_decode=dict(
             type='CrossEntropyLoss',
             use_sigmoid=False,
-            loss_weight=1.0)),
-    # ------------------- 判别器-------------------
-    discriminator_s=dict(
-        type='AdapSegDiscriminator',
-        num_conv=2,
-        gan_loss=dict(
-            type='GANLoss',
-            gan_type='vanilla',
-            real_label_val=1.0,
-            fake_label_val=0.0,
-            loss_weight=0.005),
-        norm_cfg=dict(type='IN'),
-        in_channels=512),
+            loss_weight=1.0,
+            class_weight=target_class_weight)),
     # ------------------- EMA教师网络（适配Open-Set） -------------------
     cross_EMA = dict(
         type='single_t',
@@ -78,7 +96,7 @@ model = dict(
         decay=0.999,
         pseudo_threshold=0.975,
         pseudo_rare_threshold=0.8,
-        pseudo_class_weight=None,
+        pseudo_class_weight=target_pseudo_class_weight,
         backbone_EMA=dict(
             type='MixVisionTransformer',
             init_cfg=dict(type='Pretrained', checkpoint='./pretrained/mit_b5.pth'),
@@ -101,21 +119,22 @@ model = dict(
             in_index=[0, 1, 2, 3],
             channels=256,
             dropout_ratio=0.1,
-            num_classes=6,
+            num_classes=len(target_included_classes),
             norm_cfg=norm_cfg,
             align_corners=False,
             ignore_index=255,
             loss_decode=dict(
                 type='CrossEntropyLoss',
                 use_sigmoid=False,
-                loss_weight=1.0))),
+                loss_weight=1.0,
+                class_weight=target_class_weight))),
     # model training and testing settings
     train_cfg=dict(),
     test_cfg=dict(mode='slide', crop_size=(1024, 1024), stride=(768, 768),
                   decode_head='decode_head_t'))
 
 data = dict(samples_per_gpu=4,
-            workers_per_gpu=8,
+            workers_per_gpu=4,
             train=dict(
                 source_included_classes=source_included_classes,  # 同步类别列表到数据集
                 B_img_dir = 'Potsdam_RGB/img_dir/train',
@@ -182,8 +201,8 @@ optimizer = dict(
             'pos_block': dict(decay_mult=0.),
             'norm': dict(decay_mult=0.),
             'head': dict(lr_mult=10.)
-        })),
-    discriminator_s=dict(type='Adam', lr=0.00001, betas=(0.9, 0.99)))
+        }))
+)
 
 runner = None
 #use_ddp_wrapper = True

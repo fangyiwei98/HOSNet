@@ -144,7 +144,7 @@ optimizer = dict(
 
 
 data = dict(
-    samples_per_gpu=8,
+    samples_per_gpu=4,
     workers_per_gpu=4,
     train=dict(
         source_included_classes=source_included_classes,  # 同步类别列表到数据集
