@@ -136,6 +136,7 @@ class PVDataset_forAdap(CustomDataset):
         if not self.test_mode:
             results['B_img_prefix'] = self.B_img_dir
             results['source_label_map'] = self.source_label_map
+            results['source_included_classes'] = self.source_included_classes
             results['ignore_label'] = self.ignore_label
 
         if self.custom_classes:
