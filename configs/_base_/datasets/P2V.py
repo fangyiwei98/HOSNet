@@ -7,7 +7,7 @@ img_norm_cfg = dict(
     std=[58.395, 57.12, 57.375],
     to_rgb=True)
 
-crop_size = (384, 384)
+crop_size = (512, 512)
 
 
 train_pipeline = [

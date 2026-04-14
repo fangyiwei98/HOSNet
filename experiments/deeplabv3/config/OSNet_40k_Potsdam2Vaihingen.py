@@ -4,8 +4,8 @@ _base_ = [
 ]
 
 source_included_classes = [
-    'impervious_surface', 'low_vegetation',
-    'tree', 'clutter'
+    'impervious_surface', 'building', 'low_vegetation',
+    'tree', 'car'
 ]
 target_included_classes = [
     'impervious_surface', 'building', 'low_vegetation',
@@ -150,6 +150,6 @@ data = dict(
 
 total_iters = 40000
 checkpoint_config = dict(by_epoch=False, interval=5000)
-evaluation = dict(interval=2000, metric='mIoU', pre_eval=True)
+evaluation = dict(interval=5000, metric='mIoU', pre_eval=True)
 runner = None
 find_unused_parameters = True
