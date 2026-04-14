@@ -9,6 +9,7 @@ from .transforms import (CLAHE, AdjustGamma, Normalize, Pad,
                          RandomFlip, RandomMosaic, RandomRotate, Rerange,
                          Resize, RGB2Gray, SegRescale)
 from .pv_label_map import MapPVLabelTrain, MapPVLabelEval
+from .loveda_label_map import MapLoveDALabelTrain, MapLoveDALabelEval
 
 __all__ = [
     'Compose', 'to_tensor', 'ToTensor', 'ImageToTensor', 'ToDataContainer',
@@ -17,5 +18,6 @@ __all__ = [
     'Normalize', 'SegRescale', 'PhotoMetricDistortion', 'RandomRotate',
     'AdjustGamma', 'CLAHE', 'Rerange', 'RGB2Gray', 'RandomCutOut',
     'RandomMosaic', 'LoadImageFromFile_forAdap',
-    'MapPVLabelTrain', 'MapPVLabelEval'
+    'MapPVLabelTrain', 'MapPVLabelEval',
+    'MapLoveDALabelTrain', 'MapLoveDALabelEval',
 ]

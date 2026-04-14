@@ -1,17 +1,50 @@
 _base_ = [
-    '../../../configs/_base_/datasets/R2U.py', '../../../configs/_base_/default_runtime.py'
+    '../../../configs/_base_/datasets/R2U.py',
+    '../../../configs/_base_/default_runtime.py'
 ]
 
+source_included_classes = [
+    'background', 'building', 'road',
+    'water',  'forest', 'agricultural'
+]
+target_included_classes = [
+    'background', 'building', 'road',
+    'water', 'barren', 'forest', 'agricultural'
+]
 
-# 同步控制源域类别数和解码器num_classes！！！
-source_included_classes = ['background', 'building', 'road', 'water', 'barren', 'forest']
-target_included_classes = ['background', 'building', 'road', 'water', 'barren', 'forest', 'agricultural']
+FULL_CLASS_WEIGHT = {
+    'background': 1.25,
+    'building': 1.0,
+    'road': 1.25,
+    'water': 1.0,
+    'barren': 1.5,
+    'forest': 1.25,
+    'agricultural': 1.0,
+}
 
+source_class_weight = [FULL_CLASS_WEIGHT[c] for c in source_included_classes]
+target_class_weight = [FULL_CLASS_WEIGHT[c] for c in target_included_classes]
+
+FULL_PSEUDO_WEIGHT = {
+    'background': 1.51,
+    'building': 1.01,
+    'road': 1.51,
+    'water': 1.01,
+    'barren': 2.01,
+    'forest': 1.51,
+    'agricultural': 1.01,
+}
+
+target_pseudo_class_weight = [FULL_PSEUDO_WEIGHT[c] for c in target_included_classes]
 
 norm_cfg = dict(type='SyncBN', requires_grad=True)
+
 model = dict(
     type='OSNet',
+    source_classes=source_included_classes,
+    target_classes=target_included_classes,
     pretrained='open-mmlab://resnet50_v1c',
+
     backbone_s=dict(
         type='ResNetV1c',
         depth=50,
@@ -23,6 +56,7 @@ model = dict(
         norm_eval=False,
         style='pytorch',
         contract_dilation=True),
+
     decode_head_s=dict(
         type='DepthwiseSeparableASPPHead',
         in_channels=2048,
@@ -32,13 +66,16 @@ model = dict(
         c1_in_channels=256,
         c1_channels=48,
         dropout_ratio=0.1,
-        num_classes=len(source_included_classes),  # 动态计算类别数
+        num_classes=len(source_included_classes),
         norm_cfg=norm_cfg,
         align_corners=False,
         loss_decode=dict(
             type='CrossEntropyLoss',
             use_sigmoid=False,
-            loss_weight=1.0)),
+            loss_weight=1.0,
+            class_weight=source_class_weight)
+    ),
+
     decode_head_t=dict(
         type='DepthwiseSeparableASPPHead',
         in_channels=2048,
@@ -48,41 +85,34 @@ model = dict(
         c1_in_channels=256,
         c1_channels=48,
         dropout_ratio=0.1,
-        num_classes=7,
+        num_classes=len(target_included_classes),
         norm_cfg=norm_cfg,
         align_corners=False,
         loss_decode=dict(
             type='CrossEntropyLoss',
             use_sigmoid=False,
-            loss_weight=1.0)),
-    discriminator_s=dict(
-        type='AdapSegDiscriminator',
-        gan_loss=dict(
-            type='GANLoss',
-            gan_type='vanilla',
-            real_label_val=1.0,
-            fake_label_val=0.0,
-            loss_weight=0.005),
-        norm_cfg=dict(type='IN'),
-        in_channels=2048),
-    cross_EMA = dict(
+            loss_weight=1.0,
+            class_weight=target_class_weight)
+    ),
+
+    cross_EMA=dict(
         type='decoder_only_t',
         training_ratio=0.25,
         decay=0.999,
         pseudo_threshold=0.975,
         pseudo_rare_threshold=0.8,
-        pseudo_class_weight=None,
+        pseudo_class_weight=target_pseudo_class_weight,
         backbone_EMA=dict(
-                type='ResNetV1c',
-                depth=50,
-                num_stages=4,
-                out_indices=(0, 1, 2, 3),
-                dilations=(1, 1, 2, 4),
-                strides=(1, 2, 1, 1),
-                norm_cfg=norm_cfg,
-                norm_eval=False,
-                style='pytorch',
-                contract_dilation=True),
+            type='ResNetV1c',
+            depth=50,
+            num_stages=4,
+            out_indices=(0, 1, 2, 3),
+            dilations=(1, 1, 2, 4),
+            strides=(1, 2, 1, 1),
+            norm_cfg=norm_cfg,
+            norm_eval=False,
+            style='pytorch',
+            contract_dilation=True),
         decode_head_EMA=dict(
             type='DepthwiseSeparableASPPHead',
             in_channels=2048,
@@ -92,41 +122,42 @@ model = dict(
             c1_in_channels=256,
             c1_channels=48,
             dropout_ratio=0.1,
-            num_classes=7,
+            num_classes=len(target_included_classes),
             norm_cfg=norm_cfg,
             align_corners=False,
             loss_decode=dict(
                 type='CrossEntropyLoss',
                 use_sigmoid=False,
-                loss_weight=1.0))
+                loss_weight=1.0,
+                class_weight=target_class_weight))
     ),
-    # model training and testing settings
-    train_cfg=dict(),
-    test_cfg=dict(mode='whole',decode_head='decode_head_t'))
 
-# learning policy
+    train_cfg=dict(),
+    test_cfg=dict(mode='whole', decode_head='decode_head_t')
+)
+
 lr_config = dict(policy='poly', power=0.9, min_lr=1e-5, by_epoch=False)
 
-# optimizer setting
 optimizer = dict(
     backbone_s=dict(type='SGD', lr=0.001, momentum=0.9, weight_decay=0.0005),
     decode_head_s=dict(type='SGD', lr=0.002, momentum=0.9, weight_decay=0.0005),
-    decode_head_t=dict(type='SGD', lr=0.002, momentum=0.9, weight_decay=0.0005),
-    discriminator_s=dict(type='Adam', lr=0.00025, betas=(0.9, 0.99))
-    )
+    decode_head_t=dict(type='SGD', lr=0.002, momentum=0.9, weight_decay=0.0005)
+)
 
 data = dict(
     samples_per_gpu=4,
     workers_per_gpu=4,
     train=dict(
-        source_included_classes=source_included_classes  # 同步类别列表到数据集
+        source_included_classes=source_included_classes
     ),
     val=dict(
         source_included_classes=target_included_classes
     ),
     test=dict(
-        source_included_classes=target_included_classes)
+        source_included_classes=target_included_classes
+    )
 )
+
 total_iters = 40000
 checkpoint_config = dict(by_epoch=False, interval=5000)
 evaluation = dict(interval=5000, metric='mIoU', pre_eval=True)
