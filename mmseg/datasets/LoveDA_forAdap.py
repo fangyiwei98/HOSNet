@@ -1,9 +1,6 @@
-# Copyright (c) OpenMMLab. All rights reserved.
+# mmseg/datasets/loveda_forAdap.py
 import os.path as osp
 import numpy as np
-
-import mmcv
-from PIL import Image
 
 from .builder import DATASETS
 from .custom import CustomDataset
@@ -11,10 +8,21 @@ from .custom import CustomDataset
 
 @DATASETS.register_module()
 class LoveDADataset_forAdap(CustomDataset):
-    FULL_CLASSES = ('background', 'building', 'road', 'water', 'barren',
-                    'forest', 'agricultural')
-    FULL_PALETTE = [[255, 255, 255], [255, 0, 0], [255, 255, 0], [0, 0, 255],
-                    [159, 129, 183], [0, 255, 0], [255, 195, 128]]
+    """LoveDA dataset for Domain adaptation (Open-set)"""
+
+    FULL_CLASSES = (
+        'background', 'building', 'road', 'water',
+        'barren', 'forest', 'agricultural'
+    )
+    FULL_PALETTE = [
+        [255, 255, 255],  # background
+        [255, 0, 0],      # building
+        [255, 255, 0],    # road
+        [0, 0, 255],      # water
+        [159, 129, 183],  # barren
+        [0, 255, 0],      # forest
+        [255, 195, 128],  # agricultural
+    ]
 
     CLASSES = FULL_CLASSES
     PALETTE = FULL_PALETTE
@@ -29,31 +37,19 @@ class LoveDADataset_forAdap(CustomDataset):
                  source_included_classes=None,
                  ignore_label=255,
                  **kwargs):
-
         self.ignore_label = ignore_label
         self.source_included_classes = (
             list(source_included_classes)
             if source_included_classes is not None else list(self.FULL_CLASSES)
         )
 
-        # ---------------- 新增：和 ISPRS 一样的 source_label_map 标签映射 ----------------
-        # 把 FULL_CLASSES 的索引映射到 source 子集的压缩索引，不在子集里的设为 ignore_label
-        self.source_label_map = {}
-        valid_idx = 0
-        for full_idx, cls_name in enumerate(self.FULL_CLASSES):
-            if cls_name in self.source_included_classes:
-                self.source_label_map[full_idx] = valid_idx
-                valid_idx += 1
-            else:
-                self.source_label_map[full_idx] = self.ignore_label
-        # -----------------------------------------------------------------------------
 
         self.source_num_classes = len(self.source_included_classes)
 
         super(LoveDADataset_forAdap, self).__init__(
             img_suffix='.png',
             seg_map_suffix='.png',
-            reduce_zero_label=True,
+            reduce_zero_label=False,
             split=split,
             **kwargs)
 
@@ -74,15 +70,27 @@ class LoveDADataset_forAdap(CustomDataset):
                 self.B_split = osp.join(self.data_root, self.B_split)
 
             self.B_img_infos = self.load_annotations(
-                self.B_img_dir, self.B_img_suffix,
-                self.B_ann_dir, self.B_seg_map_suffix, self.B_split)
+                self.B_img_dir,
+                self.B_img_suffix,
+                self.B_ann_dir,
+                self.B_seg_map_suffix,
+                self.B_split)
         else:
             self.B_img_infos = None
 
     def get_gt_seg_map_by_idx(self, idx):
-        """LoveDA在reduce_zero_label=True后标签已为0~6，评估阶段可直接使用。"""
+        """Return eval GT map in full target label space: raw 1~7 -> 0~6."""
         seg_map = super().get_gt_seg_map_by_idx(idx)
-        return np.array(seg_map, dtype=np.uint8)
+        seg_map = np.array(seg_map, dtype=np.uint8)
+
+        if not self.test_mode:
+            return seg_map
+
+        new_seg_map = np.ones_like(seg_map, dtype=np.uint8) * self.ignore_label
+        for raw_id in range(1, 8):
+            new_seg_map[seg_map == raw_id] = raw_id - 1
+
+        return new_seg_map
 
     def prepare_train_img(self, idx):
         img_info = self.img_infos[idx]
@@ -93,6 +101,15 @@ class LoveDADataset_forAdap(CustomDataset):
         B_img_info = self.B_img_infos[idx_b]
 
         results = dict(img_info=img_info, ann_info=ann_info, B_img_info=B_img_info)
+        self.pre_pipeline(results)
+        return self.pipeline(results)
+
+    def prepare_test_img(self, idx):
+        """修复 val/test 使用 LoadAnnotations 时缺 ann_info 的问题。"""
+        img_info = self.img_infos[idx]
+        ann_info = self.get_ann_info(idx)
+
+        results = dict(img_info=img_info, ann_info=ann_info)
         self.pre_pipeline(results)
         return self.pipeline(results)
 
