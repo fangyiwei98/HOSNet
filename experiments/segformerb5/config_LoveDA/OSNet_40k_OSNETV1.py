@@ -28,7 +28,7 @@ target_class_weight = [FULL_CLASS_WEIGHT[c] for c in target_included_classes]
 norm_cfg = dict(type='SyncBN', requires_grad=True)
 
 model = dict(
-    type='OSNet',
+    type='OSNetV1',
     source_classes=source_included_classes,
     target_classes=target_included_classes,
     pretrained=None,
@@ -82,22 +82,21 @@ model = dict(
             loss_weight=1.0,
             class_weight=target_class_weight)),
 
-    contrast_cfg=dict(
+    proto_cfg=dict(
         proj_dim=256,
         momentum=0.99,
 
+        # target known / unknown mining
         known_conf_thresh=0.7,
         unknown_conf_thresh=0.6,
         discrepancy_thresh=0.2,
 
-        tau_known=0.07,
-        tau_unknown=0.07,
+        # unknown should be away from known prototypes
         unknown_margin=0.3,
 
-        loss_karc_weight=1.0,
-        loss_uarc_weight=1.0,
-
-        max_samples=4096,
+        # two innovation losses only
+        loss_kpa_weight=1.0,
+        loss_ucr_weight=1.0,
     ),
 
     train_cfg=dict(),
@@ -142,17 +141,35 @@ optimizer = dict(
         type='AdamW',
         lr=0.00006,
         betas=(0.9, 0.999),
-        weight_decay=0.01),
+        weight_decay=0.01,
+        paramwise_cfg=dict(
+            custom_keys={
+                'pos_block': dict(decay_mult=0.),
+                'norm': dict(decay_mult=0.),
+                'head': dict(lr_mult=10.)
+            })),
     decode_head_s=dict(
         type='AdamW',
         lr=0.00006,
         betas=(0.9, 0.999),
-        weight_decay=0.01),
+        weight_decay=0.01,
+        paramwise_cfg=dict(
+            custom_keys={
+                'pos_block': dict(decay_mult=0.),
+                'norm': dict(decay_mult=0.),
+                'head': dict(lr_mult=10.)
+            })),
     decode_head_t=dict(
         type='AdamW',
         lr=0.00006,
         betas=(0.9, 0.999),
-        weight_decay=0.01),
+        weight_decay=0.01,
+        paramwise_cfg=dict(
+            custom_keys={
+                'pos_block': dict(decay_mult=0.),
+                'norm': dict(decay_mult=0.),
+                'head': dict(lr_mult=10.)
+            })),
     feat_proj=dict(
         type='AdamW',
         lr=0.00006,

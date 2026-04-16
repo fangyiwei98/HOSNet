@@ -1,6 +1,4 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-import copy
-import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -13,6 +11,14 @@ from .base import BaseSegmentor
 
 @SEGMENTORS.register_module()
 class OSNet(BaseSegmentor):
+    """
+    BARC-OSNet:
+    Bidirectional Anchor-Relation Contrast for Open-set Domain Adaptive Segmentation
+
+    Two contrastive objectives:
+    1) K-ARC: target-known pixels contrast against source-known anchors
+    2) U-ARC: target-unknown pixels repel from all source-known anchors
+    """
 
     def __init__(self,
                  backbone_s,
@@ -20,24 +26,18 @@ class OSNet(BaseSegmentor):
                  decode_head_t,
                  source_classes=None,
                  target_classes=None,
-                 cross_EMA=None,
+                 contrast_cfg=None,
                  train_cfg=None,
                  test_cfg=None,
                  pretrained=None,
                  init_cfg=None):
         super(OSNet, self).__init__(init_cfg)
 
-        assert source_classes is not None and target_classes is not None, \
-            "必须提供source_classes和target_classes!"
+        assert source_classes is not None and target_classes is not None
 
         self.source_classes = source_classes
         self.target_classes = target_classes
 
-        # source压缩通道 -> target全类别索引
-        # 例如:
-        # source_classes = [imp, low_veg, tree, car, clutter]
-        # target_classes = [imp, building, low_veg, tree, car, clutter]
-        # source_to_target_idx = [0, 2, 3, 4, 5]
         source_to_target_indices = [target_classes.index(c) for c in source_classes]
         unknown_indices = [i for i, c in enumerate(target_classes) if c not in source_classes]
 
@@ -63,194 +63,271 @@ class OSNet(BaseSegmentor):
         self.train_cfg = train_cfg
         self.test_cfg = test_cfg
 
-        if cross_EMA is not None:
-            self.cross_EMA = cross_EMA
-            self._init_cross_EMA(self.cross_EMA)
-
         self._parse_train_cfg()
+        self._init_contrast_module(contrast_cfg)
+
+    def _init_contrast_module(self, contrast_cfg):
+        if contrast_cfg is None:
+            contrast_cfg = dict()
+
+        self.proj_dim = contrast_cfg.get('proj_dim', 256)
+        self.proto_momentum = contrast_cfg.get('momentum', 0.99)
+
+        self.known_conf_thresh = contrast_cfg.get('known_conf_thresh', 0.7)
+        self.unknown_conf_thresh = contrast_cfg.get('unknown_conf_thresh', 0.6)
+        self.discrepancy_thresh = contrast_cfg.get('discrepancy_thresh', 0.2)
+
+        self.tau_known = contrast_cfg.get('tau_known', 0.07)
+        self.tau_unknown = contrast_cfg.get('tau_unknown', 0.07)
+        self.unknown_margin = contrast_cfg.get('unknown_margin', 0.3)
+
+        self.loss_karc_weight = contrast_cfg.get('loss_karc_weight', 1.0)
+        self.loss_uarc_weight = contrast_cfg.get('loss_uarc_weight', 1.0)
+
+        self.max_samples = contrast_cfg.get('max_samples', 4096)
+
+        last_channels = 512
+        self.feat_proj = nn.Sequential(
+            nn.Conv2d(last_channels, self.proj_dim, kernel_size=1, bias=False),
+            nn.BatchNorm2d(self.proj_dim),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(self.proj_dim, self.proj_dim, kernel_size=1, bias=False)
+        )
+
+        self.register_buffer(
+            'known_anchors',
+            F.normalize(torch.randn(len(self.source_classes), self.proj_dim), dim=1)
+        )
 
     def train_step(self, data_batch, optimizer, **kwargs):
         if not hasattr(self, 'iteration'):
             self.iteration = 0
-        curr_iter = self.iteration
-
-        if curr_iter % 500 == 0:
-            print('gt unique:', torch.unique(data_batch['gt_semantic_seg']))
-
-        if curr_iter > 0:
-            self._update_cross_EMA(curr_iter)
 
         optimizer['backbone_s'].zero_grad()
         optimizer['decode_head_s'].zero_grad()
         optimizer['decode_head_t'].zero_grad()
+        if 'feat_proj' in optimizer:
+            optimizer['feat_proj'].zero_grad()
 
         log_vars = dict()
 
-        # 1. 提取特征
-        F_s = self.forward_backbone(self.backbone_s, data_batch['img'])
-        F_t = self.forward_backbone(self.backbone_s, data_batch['B_img'])
+        img_s = data_batch['img']
+        img_t = data_batch['B_img']
+        gt_s = data_batch['gt_semantic_seg']
 
-        # 2. 前向预测
-        P_s = self.forward_decode_head(self.decode_head_s, F_s)
-        P_t = self.forward_decode_head(self.decode_head_t, F_t)
+        F_s = self.forward_backbone(self.backbone_s, img_s)
+        F_t = self.forward_backbone(self.backbone_s, img_t)
 
-        # 3. source supervised loss
-        loss_seg_s, log_vars_seg_s = self._get_segmentor_loss(
-            self.decode_head_s, P_s, data_batch['gt_semantic_seg'])
-        log_vars.update(log_vars_seg_s)
+        P_s_src = self.forward_decode_head(self.decode_head_s, F_s)
+        P_s_tgt = self.forward_decode_head(self.decode_head_t, F_s)
 
-        # 4. target pseudo loss
-        pseudo_label, pseudo_weight, _ = self.encode_decode_crossEMA(
-            input=data_batch['B_img'],
-            dev=data_batch['img'].device)
+        P_t_src = self.forward_decode_head(self.decode_head_s, F_t)
+        P_t_tgt = self.forward_decode_head(self.decode_head_t, F_t)
 
-        loss_seg_t, log_vars_seg_t = self._get_segmentor_loss(
-            self.decode_head_t,
-            P_t,
-            pseudo_label,
-            gt_weight=pseudo_weight)
+        # 1) source supervised seg
+        loss_seg_s, log_seg_s = self._get_segmentor_loss(
+            self.decode_head_s, P_s_src, gt_s)
+        log_vars.update(self._rename_log(log_seg_s, '_seg_s'))
 
-        if 'loss_ce' in log_vars_seg_t:
-            log_vars_seg_t['loss_ce_seg_t'] = log_vars_seg_t.pop('loss_ce')
-        if 'acc_seg' in log_vars_seg_t:
-            log_vars_seg_t['acc_seg_t'] = log_vars_seg_t.pop('acc_seg')
-        if 'loss' in log_vars_seg_t:
-            log_vars_seg_t['loss_seg_t'] = log_vars_seg_t.pop('loss')
+        gt_s_target = self._remap_source_gt_to_target(gt_s)
+        loss_seg_t, log_seg_t = self._get_segmentor_loss(
+            self.decode_head_t, P_s_tgt, gt_s_target)
+        log_vars.update(self._rename_log(log_seg_t, '_seg_t'))
 
-        log_vars.update(log_vars_seg_t)
+        # 2) update source anchors
+        feat_s = self._project_feature(F_s[-1])
+        self._update_known_anchors(feat_s, gt_s)
 
-        loss_seg = loss_seg_s + self.cross_EMA_training_ratio * loss_seg_t
-        loss_seg.backward()
+        # 3) mine target known / unknown
+        P_t_src_full = self._scatter_source_logits_to_target(P_t_src)
+        known_mask, known_label, unknown_mask = self._mine_target_masks(P_t_src_full, P_t_tgt)
+
+        feat_t = self._project_feature(F_t[-1])
+
+        # 4) BARC losses
+        loss_karc = self._known_anchor_relation_contrast(feat_t, known_mask, known_label)
+        loss_uarc = self._unknown_anchor_relation_contrast(feat_t, unknown_mask)
+
+        log_vars['loss_karc'] = loss_karc.item()
+        log_vars['loss_uarc'] = loss_uarc.item()
+
+        total_loss = (
+            loss_seg_s +
+            loss_seg_t +
+            self.loss_karc_weight * loss_karc +
+            self.loss_uarc_weight * loss_uarc
+        )
+
+        total_loss.backward()
 
         optimizer['backbone_s'].step()
         optimizer['decode_head_s'].step()
         optimizer['decode_head_t'].step()
+        if 'feat_proj' in optimizer:
+            optimizer['feat_proj'].step()
 
         self.iteration += 1
 
         outputs = dict(
-            loss=loss_seg,
+            loss=total_loss,
             log_vars=log_vars,
             num_samples=len(data_batch['img_metas'])
         )
         return outputs
 
-    def encode_decode_crossEMA(self, input=None, dev=None):
-        F_t_student = self.forward_backbone(self.backbone_s, input)
-        F_t_teacher = self.forward_backbone(self.cross_EMA_backbone, input)
+    def _rename_log(self, log_vars, suffix=''):
+        out = {}
+        for k, v in log_vars.items():
+            out[k + suffix] = v
+        return out
 
-        # 学生source head输出: 压缩类别空间
-        P_student_source = self.forward_decode_head(self.decode_head_s, F_t_student)
+    def _project_feature(self, feat):
+        feat = self.feat_proj(feat)
+        feat = F.normalize(feat, dim=1)
+        return feat
 
-        # 教师target head输出: 完整目标类别空间
-        P_teacher_target = self.forward_decode_head(self.cross_EMA_decoder, F_t_teacher)
+    def _remap_source_gt_to_target(self, gt_s):
+        gt_new = gt_s.clone()
+        valid_mask = (gt_new != 255)
+        mapped = torch.full_like(gt_new, 255)
+        for s_idx, t_idx in enumerate(self.source_to_target_idx):
+            mapped[(gt_new == s_idx) & valid_mask] = t_idx
+        return mapped
 
-        # 融合到target完整类别空间
-        P_ensemble = torch.zeros_like(P_teacher_target)
+    def _scatter_source_logits_to_target(self, pred_s):
+        B, _, H, W = pred_s.shape
+        out = pred_s.new_full((B, len(self.target_classes), H, W), -100.0)
+        out[:, self.source_to_target_idx, :, :] = pred_s
+        return out
 
-        # source压缩通道填到target全类别对应位置
-        P_ensemble[:, self.source_to_target_idx, :, :] = P_student_source
-
-        # unknown类别由teacher提供
-        if len(self.unknown_idx) > 0:
-            P_ensemble[:, self.unknown_idx, :, :] = P_teacher_target[:, self.unknown_idx, :, :]
-
-        P_EMA_KD = P_ensemble.detach()
-
-        P_final_logits = resize(
-            input=P_ensemble,
-            size=input.shape[2:],
+    @torch.no_grad()
+    def _update_known_anchors(self, feat_s, gt_s):
+        feat_s = resize(
+            feat_s,
+            size=gt_s.shape[2:],
             mode='bilinear',
             align_corners=self.align_corners)
 
-        P_EMA_detach = P_final_logits.detach()
-        pseudo_label, pseudo_weight = self.pseudo_label_generation_crossEMA(
-            P_EMA_detach, dev=dev)
+        gt = gt_s.squeeze(1)
+        for cls_id in range(len(self.source_classes)):
+            mask = (gt == cls_id)
+            if mask.sum() < 10:
+                continue
+            cls_feat = feat_s.permute(0, 2, 3, 1)[mask]
+            cls_anchor = cls_feat.mean(dim=0)
+            cls_anchor = F.normalize(cls_anchor, dim=0)
+            self.known_anchors[cls_id] = F.normalize(
+                self.proto_momentum * self.known_anchors[cls_id] +
+                (1.0 - self.proto_momentum) * cls_anchor,
+                dim=0
+            )
 
-        return pseudo_label, pseudo_weight, P_EMA_KD
+    def _mine_target_masks(self, pred_src_full, pred_tgt):
+        prob_src = F.softmax(pred_src_full, dim=1)
+        prob_tgt = F.softmax(pred_tgt, dim=1)
 
-    def pseudo_label_generation_crossEMA(self, pred, dev=None):
-        pred_softmax = torch.softmax(pred, dim=1)
+        src_share = prob_src[:, self.source_to_target_idx, :, :]
+        tgt_share = prob_tgt[:, self.source_to_target_idx, :, :]
 
-        # closed-set: 没有未知类
-        if len(self.unknown_idx) == 0:
-            pseudo_prob, pseudo_label = torch.max(pred_softmax, dim=1)
-            open_set_mask = torch.zeros_like(pseudo_prob, dtype=torch.bool)
+        src_conf, src_cls_local = torch.max(src_share, dim=1)
+        tgt_conf, tgt_cls_local = torch.max(tgt_share, dim=1)
+
+        discrepancy = torch.mean(torch.abs(src_share - tgt_share), dim=1)
+
+        known_mask = (
+            (src_cls_local == tgt_cls_local) &
+            (src_conf > self.known_conf_thresh) &
+            (tgt_conf > self.known_conf_thresh) &
+            (discrepancy < self.discrepancy_thresh)
+        )
+        known_label = src_cls_local
+
+        if len(self.unknown_idx) > 0:
+            tgt_unknown = prob_tgt[:, self.unknown_idx, :, :]
+            tgt_unknown_conf, _ = torch.max(tgt_unknown, dim=1)
+            unknown_mask = (
+                ((src_conf < self.known_conf_thresh) | (discrepancy > self.discrepancy_thresh)) &
+                (tgt_unknown_conf > self.unknown_conf_thresh)
+            )
         else:
-            # open-set: 已知类最大概率
-            pred_known = pred_softmax[:, self.source_to_target_idx, :, :]
-            max_known_prob, max_known_local_idx = torch.max(pred_known, dim=1)
+            unknown_mask = (src_conf < self.known_conf_thresh) | (discrepancy > self.discrepancy_thresh)
 
-            # 局部source类索引 -> target全类别索引
-            pseudo_label = self.source_to_target_idx[max_known_local_idx]
+        return known_mask, known_label, unknown_mask
 
-            # 低置信度区域转未知类竞争
-            open_set_mask = max_known_prob < 0.5
+    def _sample_vectors(self, feat_map, mask, labels=None, max_samples=4096):
+        """
+        feat_map: [B, C, H, W]
+        mask: [B, H, W]
+        labels: [B, H, W] or None
+        """
+        feat_map = resize(
+            feat_map,
+            size=mask.shape[1:],
+            mode='bilinear',
+            align_corners=self.align_corners)
 
-            pred_unknown = pred_softmax[:, self.unknown_idx, :, :]
-            max_unknown_prob, max_unknown_local_idx = torch.max(pred_unknown, dim=1)
-            best_unknown_label = self.unknown_idx[max_unknown_local_idx]
+        feat_vec = feat_map.permute(0, 2, 3, 1)[mask]  # [N, C]
 
-            pseudo_label = torch.where(open_set_mask, best_unknown_label, pseudo_label)
-            pseudo_prob = torch.where(open_set_mask, max_unknown_prob, max_known_prob)
+        if feat_vec.shape[0] == 0:
+            if labels is None:
+                return None, None
+            return None, None
 
-        ps_large_p = pseudo_prob.ge(self.cross_EMA_pseu_thre).long() == 1
-        ps_size = np.size(np.array(pseudo_label.cpu()))
-        pseudo_weight_ratio = torch.sum(ps_large_p).item() / (ps_size + 1e-8)
-        pseudo_weight = pseudo_weight_ratio * torch.ones(pseudo_prob.shape, device=dev)
+        if feat_vec.shape[0] > max_samples:
+            idx = torch.randperm(feat_vec.shape[0], device=feat_vec.device)[:max_samples]
+            feat_vec = feat_vec[idx]
+            if labels is not None:
+                label_vec = labels[mask][idx]
+            else:
+                label_vec = None
+        else:
+            if labels is not None:
+                label_vec = labels[mask]
+            else:
+                label_vec = None
 
-        if hasattr(self, 'iteration') and self.iteration % 100 == 0:
-            valid_num = torch.sum(ps_large_p).item()
-            total_num = ps_size
-            unknown_pixel_num = torch.sum(open_set_mask).item()
+        return feat_vec, label_vec
 
-            print(f"\n========== Iter {self.iteration} 伪标签统计 ==========")
-            print(f"已知类: {self.source_classes}")
-            print(f"未知类: {[self.target_classes[i] for i in self.unknown_idx.cpu().numpy()]}")
-            print(f"总像素: {total_num} | 高置信度: {valid_num} | 有效比例: {pseudo_weight_ratio * 100:.2f}%")
-            print(f"🚨 判定为未知类: {unknown_pixel_num} ({unknown_pixel_num / total_num * 100:.2f}%)")
+    def _known_anchor_relation_contrast(self, feat_t, known_mask, known_label):
+        """
+        K-ARC:
+        target-known pixel vs source-known anchors
+        positive anchor = corresponding class anchor
+        negative anchors = all other known anchors
+        """
+        feat_vec, label_vec = self._sample_vectors(
+            feat_t, known_mask, known_label, self.max_samples)
 
-            pseudo_label_np = pseudo_label.cpu().numpy()
-            pseudo_prob_np = pseudo_prob.detach().cpu().numpy()
-            ps_large_p_np = ps_large_p.cpu().numpy()
-            valid_labels = pseudo_label_np[ps_large_p_np]
+        if feat_vec is None or feat_vec.shape[0] < 1:
+            return feat_t.sum() * 0.0
 
-            if len(valid_labels) > 0:
-                print("---------- 高置信度类别分布 ----------")
-                for cls in np.unique(valid_labels):
-                    cls_mask = valid_labels == cls
-                    cnt = np.sum(cls_mask)
-                    avg_prob = np.mean(pseudo_prob_np[ps_large_p_np][cls_mask])
+        logits = torch.matmul(feat_vec, self.known_anchors.t())  # [N, K]
+        logits = logits / self.tau_known
 
-                    cls_name = self.target_classes[cls]
-                    mark = "🚨" if cls in self.unknown_idx else "✅"
-                    print(f"{mark} 类别 {cls} ({cls_name}) | 数量: {cnt} | 平均置信度: {avg_prob:.4f}")
+        loss = F.cross_entropy(logits, label_vec)
+        return loss
 
-        if self.cross_EMA_pseu_cls_weight is not None and self.cross_EMA_rare_pseu_thre is not None:
-            ps_large_p_rare = pseudo_prob.ge(self.cross_EMA_rare_pseu_thre).long() == 1
-            pseudo_weight = pseudo_weight * ps_large_p_rare
-            pseudo_class_weight = copy.deepcopy(pseudo_label.float())
-            for i in range(len(self.cross_EMA_pseu_cls_weight)):
-                pseudo_class_weight[pseudo_class_weight == i] = self.cross_EMA_pseu_cls_weight[i]
-            pseudo_weight = pseudo_class_weight * pseudo_weight
-            pseudo_weight[pseudo_weight == 0] = pseudo_weight_ratio * 0.5
+    def _unknown_anchor_relation_contrast(self, feat_t, unknown_mask):
+        """
+        U-ARC:
+        target-unknown pixels have no positive anchor.
+        We propose an anchor-free negative contrast:
+            log(1 + sum_j exp((sim(f, c_j)-m)/tau))
+        """
+        feat_vec, _ = self._sample_vectors(
+            feat_t, unknown_mask, labels=None, max_samples=self.max_samples)
 
-        pseudo_label = pseudo_label.unsqueeze(1)
-        return pseudo_label, pseudo_weight
+        if feat_vec is None or feat_vec.shape[0] < 1:
+            return feat_t.sum() * 0.0
 
-    def _init_cross_EMA(self, cfg):
-        self.cross_EMA_type = cfg['type']
-        self.cross_EMA_alpha = cfg['decay']
-        self.cross_EMA_training_ratio = cfg['training_ratio']
-        self.cross_EMA_pseu_cls_weight = cfg['pseudo_class_weight']
-        self.cross_EMA_pseu_thre = cfg['pseudo_threshold']
-        self.cross_EMA_rare_pseu_thre = cfg['pseudo_rare_threshold']
-        self.cross_EMA_backbone = builder.build_backbone(cfg['backbone_EMA'])
-        self.cross_EMA_decoder = self._init_decode_head(cfg['decode_head_EMA'])
+        logits = torch.matmul(feat_vec, self.known_anchors.t())  # [N, K]
+        logits = (logits - self.unknown_margin) / self.tau_unknown
+
+        loss = torch.log1p(torch.exp(logits).sum(dim=1)).mean()
+        return loss
 
     def _init_decode_head(self, decode_head):
-        decode_head = builder.build_head(decode_head)
-        return decode_head
+        return builder.build_head(decode_head)
 
     def _parse_train_cfg(self):
         if self.train_cfg is None:
@@ -259,28 +336,11 @@ class OSNet(BaseSegmentor):
         self.disc_init_steps = self.train_cfg.get('disc_init_steps', 0)
 
     def extract_feat(self, img):
-        x = self.backbone_s(img)
-        return x
-
-    def _update_cross_EMA(self, iter):
-        alpha_t = min(1 - 1 / (iter + 1), self.cross_EMA_alpha)
-
-        for ema_b, target_b in zip(self.cross_EMA_backbone.parameters(), self.backbone_s.parameters()):
-            if not target_b.data.shape:
-                ema_b.data = alpha_t * ema_b.data + (1 - alpha_t) * target_b.data
-            else:
-                ema_b.data[:] = alpha_t * ema_b.data[:] + (1 - alpha_t) * target_b.data[:]
-
-        for ema_d, target_d in zip(self.cross_EMA_decoder.parameters(), self.decode_head_t.parameters()):
-            if not target_d.data.shape:
-                ema_d.data = alpha_t * ema_d.data + (1 - alpha_t) * target_d.data
-            else:
-                ema_d.data[:] = alpha_t * ema_d.data[:] + (1 - alpha_t) * target_d.data[:]
+        return self.backbone_s(img)
 
     def encode_decode(self, img, img_metas):
         F_t = self.forward_backbone(self.backbone_s, img)
         P_t = self.forward_decode_head(self.decode_head_t, F_t)
-
         out = resize(
             input=P_t,
             size=img.shape[2:],
@@ -293,17 +353,13 @@ class OSNet(BaseSegmentor):
         return seg_logits
 
     def forward_dummy(self, img):
-        seg_logit = self.encode_decode(img, None)
-        return seg_logit
+        return self.encode_decode(img, None)
 
     def forward_backbone(self, backbone, img):
         return backbone(img)
 
     def forward_decode_head(self, decode_head, feature):
         return decode_head(feature)
-
-    def forward_discriminator(self, discriminator, seg_pred):
-        return discriminator(seg_pred)
 
     def forward_train(self, img, B_img):
         pass
@@ -314,18 +370,6 @@ class OSNet(BaseSegmentor):
         losses.update(loss_seg)
         loss_seg, log_vars_seg = self._parse_losses(losses)
         return loss_seg, log_vars_seg
-
-    def _get_gan_loss(self, discriminator, pred, domain, target_is_real):
-        losses = dict()
-        losses[f'loss_gan_{domain}'] = discriminator.gan_loss(pred, target_is_real)
-        loss_dis, log_vars_dis = self._parse_losses(losses)
-        return loss_dis, log_vars_dis
-
-    def _get_KD_loss(self, teacher, student, pred_name, T=3):
-        losses = dict()
-        losses[f'loss_KD_{pred_name}'] = self.KL_loss(teacher, student, T)
-        loss_KD, log_vars_KD = self._parse_losses(losses)
-        return loss_KD, log_vars_KD
 
     def slide_inference(self, img, img_meta, rescale):
         h_stride, w_stride = self.test_cfg.stride
@@ -357,11 +401,6 @@ class OSNet(BaseSegmentor):
                 )
                 count_mat[:, :, y1:y2, x1:x2] += 1
 
-        assert (count_mat == 0).sum() == 0
-
-        if torch.onnx.is_in_onnx_export():
-            count_mat = torch.from_numpy(count_mat.cpu().detach().numpy()).to(device=img.device)
-
         preds = preds / count_mat
 
         if rescale:
@@ -375,20 +414,14 @@ class OSNet(BaseSegmentor):
 
     def whole_inference(self, img, img_meta, rescale):
         seg_logit = self.encode_decode(img, img_meta)
-
         if rescale:
-            if torch.onnx.is_in_onnx_export():
-                size = img.shape[2:]
-            else:
-                size = img_meta[0]['ori_shape'][:2]
-
+            size = img_meta[0]['ori_shape'][:2] if not torch.onnx.is_in_onnx_export() else img.shape[2:]
             seg_logit = resize(
                 seg_logit,
                 size=size,
                 mode='bilinear',
                 align_corners=self.align_corners,
                 warning=False)
-
         return seg_logit
 
     def inference(self, img, img_meta, rescale):
@@ -406,66 +439,26 @@ class OSNet(BaseSegmentor):
         flip = img_meta[0]['flip']
         if flip:
             flip_direction = img_meta[0]['flip_direction']
-            assert flip_direction in ['horizontal', 'vertical']
             if flip_direction == 'horizontal':
                 output = output.flip(dims=(3,))
             elif flip_direction == 'vertical':
                 output = output.flip(dims=(2,))
-
         return output
 
     def simple_test(self, img, img_meta, rescale=True):
         seg_logit = self.inference(img, img_meta, rescale)
         seg_pred = seg_logit.argmax(dim=1)
-
         if torch.onnx.is_in_onnx_export():
-            seg_pred = seg_pred.unsqueeze(0)
-            return seg_pred
-
+            return seg_pred.unsqueeze(0)
         seg_pred = seg_pred.cpu().numpy()
-        seg_pred = list(seg_pred)
-        return seg_pred
+        return list(seg_pred)
 
     def aug_test(self, imgs, img_metas, rescale=True):
         assert rescale
-
         seg_logit = self.inference(imgs[0], img_metas[0], rescale)
         for i in range(1, len(imgs)):
-            cur_seg_logit = self.inference(imgs[i], img_metas[i], rescale)
-            seg_logit += cur_seg_logit
-
+            seg_logit += self.inference(imgs[i], img_metas[i], rescale)
         seg_logit /= len(imgs)
         seg_pred = seg_logit.argmax(dim=1)
         seg_pred = seg_pred.cpu().numpy()
-        seg_pred = list(seg_pred)
-        return seg_pred
-
-    def MSE_loss(self, teacher, student):
-        mse_loss = nn.MSELoss()
-        t = self.sw_softmax(teacher)
-        s = self.sw_softmax(student)
-        return mse_loss(s, t)
-
-    @staticmethod
-    def set_requires_grad(nets, requires_grad=False):
-        if not isinstance(nets, list):
-            nets = [nets]
-        for net in nets:
-            if net is not None:
-                for param in net.parameters():
-                    param.requires_grad = requires_grad
-
-    @staticmethod
-    def sw_softmax(pred):
-        N, C, H, W = pred.shape
-        pred_sh = torch.reshape(pred, (N, C, H * W))
-        pred_sh = F.softmax(pred_sh, dim=2)
-        pred_out = torch.reshape(pred_sh, (N, C, H, W))
-        return pred_out
-
-    @staticmethod
-    def KL_loss(teacher, student, T=5):
-        return nn.KLDivLoss(reduction='mean')(
-            F.log_softmax(student / T, dim=1),
-            F.softmax(teacher / T, dim=1)
-        ) * (T * T)
+        return list(seg_pred)
