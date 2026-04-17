@@ -4,9 +4,10 @@ _base_ = [
 ]
 
 source_included_classes = [
-    'background', 'building',
-    'water', 'barren', 'forest', 'agricultural'
+    'background', 'building', 'road',
+    'water', 'barren', 'forest'
 ]
+
 target_included_classes = [
     'background', 'building', 'road',
     'water', 'barren', 'forest', 'agricultural'
@@ -87,15 +88,16 @@ model = dict(
         momentum=0.99,
 
         known_conf_thresh=0.7,
-        unknown_conf_thresh=0.6,
-        discrepancy_thresh=0.2,
+        unknown_conf_thresh=0.45,
+        discrepancy_thresh=0.1,
 
         tau_known=0.07,
         tau_unknown=0.07,
-        unknown_margin=0.3,
+        unknown_margin=0.2,
 
         loss_karc_weight=1.0,
         loss_uarc_weight=1.0,
+        loss_unknown_seg_weight=0.5,
 
         max_samples=4096,
     ),
@@ -142,17 +144,35 @@ optimizer = dict(
         type='AdamW',
         lr=0.00006,
         betas=(0.9, 0.999),
-        weight_decay=0.01),
+        weight_decay=0.01,
+        paramwise_cfg=dict(
+            custom_keys={
+                'pos_block': dict(decay_mult=0.),
+                'norm': dict(decay_mult=0.),
+                'head': dict(lr_mult=10.)
+            })),
     decode_head_s=dict(
         type='AdamW',
         lr=0.00006,
         betas=(0.9, 0.999),
-        weight_decay=0.01),
+        weight_decay=0.01,
+        paramwise_cfg=dict(
+            custom_keys={
+                'pos_block': dict(decay_mult=0.),
+                'norm': dict(decay_mult=0.),
+                'head': dict(lr_mult=10.)
+            })),
     decode_head_t=dict(
         type='AdamW',
         lr=0.00006,
         betas=(0.9, 0.999),
-        weight_decay=0.01),
+        weight_decay=0.01,
+        paramwise_cfg=dict(
+            custom_keys={
+                'pos_block': dict(decay_mult=0.),
+                'norm': dict(decay_mult=0.),
+                'head': dict(lr_mult=10.)
+            })),
     feat_proj=dict(
         type='AdamW',
         lr=0.00006,

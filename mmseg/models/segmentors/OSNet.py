@@ -83,6 +83,7 @@ class OSNet(BaseSegmentor):
 
         self.loss_karc_weight = contrast_cfg.get('loss_karc_weight', 1.0)
         self.loss_uarc_weight = contrast_cfg.get('loss_uarc_weight', 1.0)
+        self.loss_unknown_seg_weight = contrast_cfg.get('loss_unknown_seg_weight', 0.5)
 
         self.max_samples = contrast_cfg.get('max_samples', 4096)
 
@@ -138,9 +139,9 @@ class OSNet(BaseSegmentor):
         feat_s = self._project_feature(F_s[-1])
         self._update_known_anchors(feat_s, gt_s)
 
-        # 3) mine target known / unknown
+        # 3) mine target known / unknown  ====================== 修改这里 ======================
         P_t_src_full = self._scatter_source_logits_to_target(P_t_src)
-        known_mask, known_label, unknown_mask = self._mine_target_masks(P_t_src_full, P_t_tgt)
+        known_mask, known_label, unknown_mask, unknown_label = self._mine_target_masks(P_t_src_full, P_t_tgt)
 
         feat_t = self._project_feature(F_t[-1])
 
@@ -148,14 +149,31 @@ class OSNet(BaseSegmentor):
         loss_karc = self._known_anchor_relation_contrast(feat_t, known_mask, known_label)
         loss_uarc = self._unknown_anchor_relation_contrast(feat_t, unknown_mask)
 
+        # ====================== 新增：未知类伪标签监督损失 ======================
+        loss_unknown_seg = 0.0
+        if unknown_mask.sum() > 0:
+            # 把筛选出的未知像素 强制监督为 road 类别
+            loss_unknown, _ = self._get_segmentor_loss(
+                self.decode_head_t,
+                P_t_tgt,
+                unknown_label.unsqueeze(1),  # 伪标签
+                gt_weight=unknown_mask.float()  # 只监督未知区域
+            )
+            loss_unknown_seg = loss_unknown * self.loss_unknown_seg_weight  # 损失权重，可调
+            log_vars['loss_unknown_seg'] = loss_unknown_seg.item()
+        else:
+            log_vars['loss_unknown_seg'] = 0.0
+        # ============================================================================
+
         log_vars['loss_karc'] = loss_karc.item()
         log_vars['loss_uarc'] = loss_uarc.item()
 
         total_loss = (
-            loss_seg_s +
-            loss_seg_t +
-            self.loss_karc_weight * loss_karc +
-            self.loss_uarc_weight * loss_uarc
+                loss_seg_s +
+                loss_seg_t +
+                self.loss_karc_weight * loss_karc +
+                self.loss_uarc_weight * loss_uarc +
+                loss_unknown_seg  # 加入总损失
         )
 
         total_loss.backward()
@@ -235,25 +253,33 @@ class OSNet(BaseSegmentor):
         discrepancy = torch.mean(torch.abs(src_share - tgt_share), dim=1)
 
         known_mask = (
-            (src_cls_local == tgt_cls_local) &
-            (src_conf > self.known_conf_thresh) &
-            (tgt_conf > self.known_conf_thresh) &
-            (discrepancy < self.discrepancy_thresh)
+                (src_cls_local == tgt_cls_local) &
+                (src_conf > self.known_conf_thresh) &
+                (tgt_conf > self.known_conf_thresh) &
+                (discrepancy < self.discrepancy_thresh)
         )
         known_label = src_cls_local
 
+        # ====================== 多未知类核心修改 ======================
         if len(self.unknown_idx) > 0:
-            tgt_unknown = prob_tgt[:, self.unknown_idx, :, :]
-            tgt_unknown_conf, _ = torch.max(tgt_unknown, dim=1)
+            # 条件不变：不确定 / 不一致 → 未知
             unknown_mask = (
-                ((src_conf < self.known_conf_thresh) | (discrepancy > self.discrepancy_thresh)) &
-                (tgt_unknown_conf > self.unknown_conf_thresh)
+                    (src_conf < self.known_conf_thresh) |
+                    (discrepancy > self.discrepancy_thresh)
             )
+
+            # ============== 关键：自动取目标域预测的未知类标签 ==============
+            # 取出所有未知类的概率 → 取最大作为伪标签
+            prob_tgt_unknown = prob_tgt[:, self.unknown_idx, :, :]
+            _, pred_unknown_local = torch.max(prob_tgt_unknown, dim=1)
+            unknown_label = self.unknown_idx[pred_unknown_local]
+
         else:
             unknown_mask = (src_conf < self.known_conf_thresh) | (discrepancy > self.discrepancy_thresh)
+            unknown_label = torch.full_like(known_label, 255)  # 无未知类时忽略
+        # ===============================================================
 
-        return known_mask, known_label, unknown_mask
-
+        return known_mask, known_label, unknown_mask, unknown_label
     def _sample_vectors(self, feat_map, mask, labels=None, max_samples=4096):
         """
         feat_map: [B, C, H, W]
