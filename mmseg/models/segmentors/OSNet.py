@@ -87,7 +87,12 @@ class OSNet(BaseSegmentor):
 
         self.max_samples = contrast_cfg.get('max_samples', 4096)
 
-        last_channels = 512
+        in_channels = self.decode_head_s.in_channels
+        if isinstance(in_channels, (list, tuple)):
+            last_channels = in_channels[-1]
+        else:
+            last_channels = in_channels
+
         self.feat_proj = nn.Sequential(
             nn.Conv2d(last_channels, self.proj_dim, kernel_size=1, bias=False),
             nn.BatchNorm2d(self.proj_dim),
