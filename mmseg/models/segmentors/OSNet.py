@@ -144,7 +144,7 @@ class OSNet(BaseSegmentor):
         feat_s = self._project_feature(F_s[-1])
         self._update_known_anchors(feat_s, gt_s)
 
-        # 3) mine target known / unknown  ====================== 修改这里 ======================
+        # 3) mine target known / unknown
         P_t_src_full = self._scatter_source_logits_to_target(P_t_src)
         known_mask, known_label, unknown_mask, unknown_label = self._mine_target_masks(P_t_src_full, P_t_tgt)
 
@@ -260,7 +260,6 @@ class OSNet(BaseSegmentor):
         known_mask = (
                 (src_cls_local == tgt_cls_local) &
                 (src_conf > self.known_conf_thresh) &
-                (tgt_conf > self.known_conf_thresh) &
                 (discrepancy < self.discrepancy_thresh)
         )
         known_label = src_cls_local
