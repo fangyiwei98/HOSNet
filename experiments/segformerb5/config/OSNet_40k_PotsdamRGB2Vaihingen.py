@@ -138,8 +138,8 @@ lr_config = dict(
     by_epoch=False)
 
 total_iters = 40000
-checkpoint_config = dict(by_epoch=False, interval=5000)
-evaluation = dict(interval=5000, metric='mIoU', pre_eval=True)
+checkpoint_config = dict(by_epoch=False, interval=1000)
+evaluation = dict(interval=1000, metric='mIoU', pre_eval=True)
 
 # optimizer setting
 optimizer = dict(

@@ -25,7 +25,7 @@ from mmseg.utils import collect_env, get_root_logger, setup_multi_processes
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Train a segmentor')
-    parser.add_argument('--config', default='experiments/deeplabv3/config/OSNet_40k_Potsdam2Vaihingen.py',
+    parser.add_argument('--config', default='experiments/deeplabv3/config/OSNet_40k_PotsdamRGB2Vaihingen.py',
                         help='train config file path')
     # 添加工作目录参数，用于保存日志和模型
     parser.add_argument('--work-dir', default='./OSNet_R2U/', help='the dir to save logs and models')
@@ -47,7 +47,7 @@ def parse_args():
                             help='(Deprecated, please use --gpu-id) ids of gpus to use '
                                  '(only applicable to non-distributed training)')
     # 添加GPU ID参数
-    group_gpus.add_argument('--gpu-id', type=int, default=3, help='id of gpu to use '
+    group_gpus.add_argument('--gpu-id', type=int, default=0, help='id of gpu to use '
                                                                   '(only applicable to non-distributed training)')
     parser.add_argument('--seed', type=int, default=None, help='random seed')
     # 添加设置CUDNN后端为确定性选项的布尔参数
@@ -169,17 +169,17 @@ def main():
     train_dataset = datasets[0]
 
     # 打印源域信息
-    logger.info("=" * 80)
-    logger.info(f"【源域训练类别】: {train_dataset.source_included_classes}")
-    logger.info(f"【源域有效类别数】: {train_dataset.source_num_classes}")
-    logger.info(
-        f"【源域被忽略的类别】: {[cls for cls in train_dataset.FULL_CLASSES if cls not in train_dataset.source_included_classes]}")
-    logger.info(f"【源域标签映射表】: {train_dataset.source_label_map}")  # 查看原始标签→训练标签的映射
-
-    # 打印目标域信息（目标域固定为全6类）
-    logger.info(f"【目标域训练类别】: {train_dataset.FULL_CLASSES}")
-    logger.info(f"【目标域类别数】: {len(train_dataset.FULL_CLASSES)}")
-    logger.info("=" * 80)
+    # logger.info("=" * 80)
+    # logger.info(f"【源域训练类别】: {train_dataset.source_included_classes}")
+    # logger.info(f"【源域有效类别数】: {train_dataset.source_num_classes}")
+    # logger.info(
+    #     f"【源域被忽略的类别】: {[cls for cls in train_dataset.FULL_CLASSES if cls not in train_dataset.source_included_classes]}")
+    # logger.info(f"【源域标签映射表】: {train_dataset.source_label_map}")  # 查看原始标签→训练标签的映射
+    #
+    # # 打印目标域信息（目标域固定为全6类）
+    # logger.info(f"【目标域训练类别】: {train_dataset.FULL_CLASSES}")
+    # logger.info(f"【目标域类别数】: {len(train_dataset.FULL_CLASSES)}")
+    # logger.info("=" * 80)
     # ======================================================================
 
     # 如果工作流包括验证步骤，构建验证数据集
