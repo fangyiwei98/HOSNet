@@ -87,9 +87,9 @@ model = dict(
         proj_dim=256,
         momentum=0.99,
 
-        known_conf_thresh=0.7,
+        known_conf_thresh=0.9,
         unknown_conf_thresh=0.45,
-        discrepancy_thresh=0.1,
+        discrepancy_thresh=0.15,
 
         tau_known=0.07,
         tau_unknown=0.07,
@@ -97,7 +97,7 @@ model = dict(
 
         loss_karc_weight=1.0,
         loss_uarc_weight=1.0,
-        loss_unknown_seg_weight=0.5,
+        loss_unknown_seg_weight=0.05,
 
         max_samples=4096,
     ),

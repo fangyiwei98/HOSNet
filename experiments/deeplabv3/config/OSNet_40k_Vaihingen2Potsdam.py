@@ -24,16 +24,6 @@ FULL_CLASS_WEIGHT = {
 source_class_weight = [FULL_CLASS_WEIGHT[c] for c in source_included_classes]
 target_class_weight = [FULL_CLASS_WEIGHT[c] for c in target_included_classes]
 
-FULL_PSEUDO_WEIGHT = {
-    'impervious_surface': 1.01,
-    'building': 1.01,
-    'low_vegetation': 1.51,
-    'tree': 1.51,
-    'car': 2.01,
-    'clutter': 2.01,
-}
-target_pseudo_class_weight = [FULL_PSEUDO_WEIGHT[c] for c in target_included_classes]
-
 
 norm_cfg = dict(type='SyncBN', requires_grad=True)
 model = dict(
@@ -92,41 +82,23 @@ model = dict(
             class_weight=target_class_weight)
     ),
 
-    cross_EMA=dict(
-        type='decoder_only_t',
-        training_ratio=0.25,
-        decay=0.999,
-        pseudo_threshold=0.975,
-        pseudo_rare_threshold=0.8,
-        pseudo_class_weight=target_pseudo_class_weight,
-        backbone_EMA=dict(
-            type='ResNetV1c',
-            depth=50,
-            num_stages=4,
-            out_indices=(0, 1, 2, 3),
-            dilations=(1, 1, 2, 4),
-            strides=(1, 2, 1, 1),
-            norm_cfg=norm_cfg,
-            norm_eval=False,
-            style='pytorch',
-            contract_dilation=True),
-        decode_head_EMA=dict(
-            type='DepthwiseSeparableASPPHead',
-            in_channels=2048,
-            in_index=3,
-            channels=512,
-            dilations=(1, 12, 24, 36),
-            c1_in_channels=256,
-            c1_channels=48,
-            dropout_ratio=0.1,
-            num_classes=len(target_included_classes),
-            norm_cfg=norm_cfg,
-            align_corners=False,
-            loss_decode=dict(
-                type='CrossEntropyLoss',
-                use_sigmoid=False,
-                loss_weight=1.0,
-                class_weight=target_class_weight))
+    contrast_cfg=dict(
+        proj_dim=256,
+        momentum=0.99,
+
+        known_conf_thresh=0.9,
+        unknown_conf_thresh=0.45,
+        discrepancy_thresh=0.15,
+
+        tau_known=0.07,
+        tau_unknown=0.07,
+        unknown_margin=0.2,
+
+        loss_karc_weight=1.0,
+        loss_uarc_weight=1.0,
+        loss_unknown_seg_weight=0.05,
+
+        max_samples=4096,
     ),
 
     train_cfg=dict(),
@@ -140,7 +112,12 @@ lr_config = dict(policy='poly', power=0.9, min_lr=1e-5, by_epoch=False)
 optimizer = dict(
     backbone_s=dict(type='SGD', lr=0.001, momentum=0.9, weight_decay=0.0005),
     decode_head_s=dict(type='SGD', lr=0.002, momentum=0.9, weight_decay=0.0005),
-    decode_head_t=dict(type='SGD', lr=0.002, momentum=0.9, weight_decay=0.0005)
+    decode_head_t=dict(type='SGD', lr=0.002, momentum=0.9, weight_decay=0.0005),
+    feat_proj=dict(
+        type='AdamW',
+        lr=0.00006,
+        betas=(0.9, 0.999),
+        weight_decay=0.01)
 )
 
 data = dict(
