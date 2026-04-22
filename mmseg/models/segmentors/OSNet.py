@@ -12,12 +12,12 @@ from .base import BaseSegmentor
 @SEGMENTORS.register_module()
 class OSNet(BaseSegmentor):
     """
-    BARC-OSNet:
-    Bidirectional Anchor-Relation Contrast for Open-set Domain Adaptive Segmentation
+    Unified-Anchor OSNet for Open-set Domain Adaptive Segmentation
 
-    Two contrastive objectives:
-    1) K-ARC: target-known pixels contrast against source-known anchors
-    2) U-ARC: target-unknown pixels repel from all source-known anchors
+    Main changes:
+    1) Remove unknown segmentation pseudo-label loss.
+    2) Merge known/unknown contrast into one unified anchor contrastive loss.
+    3) Build virtual anchors for multiple unknown classes and update them online.
     """
 
     def __init__(self,
@@ -40,6 +40,8 @@ class OSNet(BaseSegmentor):
 
         source_to_target_indices = [target_classes.index(c) for c in source_classes]
         unknown_indices = [i for i, c in enumerate(target_classes) if c not in source_classes]
+
+        self.unknown_indices = unknown_indices
 
         self.register_buffer(
             'source_to_target_idx',
@@ -74,18 +76,13 @@ class OSNet(BaseSegmentor):
         self.proto_momentum = contrast_cfg.get('momentum', 0.99)
 
         self.known_conf_thresh = contrast_cfg.get('known_conf_thresh', 0.7)
-        self.unknown_conf_thresh = contrast_cfg.get('unknown_conf_thresh', 0.6)
         self.discrepancy_thresh = contrast_cfg.get('discrepancy_thresh', 0.2)
 
-        self.tau_known = contrast_cfg.get('tau_known', 0.07)
-        self.tau_unknown = contrast_cfg.get('tau_unknown', 0.07)
-        self.unknown_margin = contrast_cfg.get('unknown_margin', 0.3)
-
-        self.loss_karc_weight = contrast_cfg.get('loss_karc_weight', 1.0)
-        self.loss_uarc_weight = contrast_cfg.get('loss_uarc_weight', 1.0)
-        self.loss_unknown_seg_weight = contrast_cfg.get('loss_unknown_seg_weight', 0.5)
+        self.tau_unified = contrast_cfg.get('tau_unified', 0.07)
+        self.loss_contrast_weight = contrast_cfg.get('loss_contrast_weight', 1.0)
 
         self.max_samples = contrast_cfg.get('max_samples', 4096)
+        self.min_pixels_per_anchor = contrast_cfg.get('min_pixels_per_anchor', 10)
 
         in_channels = self.decode_head_s.in_channels
         if isinstance(in_channels, (list, tuple)):
@@ -104,6 +101,17 @@ class OSNet(BaseSegmentor):
             'known_anchors',
             F.normalize(torch.randn(len(self.source_classes), self.proj_dim), dim=1)
         )
+
+        if len(self.unknown_indices) > 0:
+            self.register_buffer(
+                'unknown_anchors',
+                F.normalize(torch.randn(len(self.unknown_indices), self.proj_dim), dim=1)
+            )
+        else:
+            self.register_buffer(
+                'unknown_anchors',
+                torch.zeros(0, self.proj_dim)
+            )
 
     def train_step(self, data_batch, optimizer, **kwargs):
         if not hasattr(self, 'iteration'):
@@ -140,45 +148,38 @@ class OSNet(BaseSegmentor):
             self.decode_head_t, P_s_tgt, gt_s_target)
         log_vars.update(self._rename_log(log_seg_t, '_seg_t'))
 
-        # 2) update source anchors
+        # 2) project features
         feat_s = self._project_feature(F_s[-1])
-        self._update_known_anchors(feat_s, gt_s)
-
-        # 3) mine target known / unknown
-        P_t_src_full = self._scatter_source_logits_to_target(P_t_src)
-        known_mask, known_label, unknown_mask, unknown_label = self._mine_target_masks(P_t_src_full, P_t_tgt)
-
         feat_t = self._project_feature(F_t[-1])
 
-        # 4) BARC losses
-        loss_karc = self._known_anchor_relation_contrast(feat_t, known_mask, known_label)
-        loss_uarc = self._unknown_anchor_relation_contrast(feat_t, unknown_mask)
+        # 3) update source known anchors
+        self._update_known_anchors(feat_s, gt_s)
 
-        # ====================== 新增：未知类伪标签监督损失 ======================
-        loss_unknown_seg = 0.0
-        if unknown_mask.sum() > 0:
-            # 把筛选出的未知像素 强制监督为 road 类别
-            loss_unknown, _ = self._get_segmentor_loss(
-                self.decode_head_t,
-                P_t_tgt,
-                unknown_label.unsqueeze(1),  # 伪标签
-                gt_weight=unknown_mask.float()  # 只监督未知区域
-            )
-            loss_unknown_seg = loss_unknown * self.loss_unknown_seg_weight  # 损失权重，可调
-            log_vars['loss_unknown_seg'] = loss_unknown_seg.item()
-        else:
-            log_vars['loss_unknown_seg'] = 0.0
-        # ============================================================================
+        # 4) mine target known / unknown masks
+        P_t_src_full = self._scatter_source_logits_to_target(P_t_src)
+        known_mask, known_label, unknown_mask, unknown_label_local = \
+            self._mine_target_masks(P_t_src_full, P_t_tgt)
 
-        log_vars['loss_karc'] = loss_karc.item()
-        log_vars['loss_uarc'] = loss_uarc.item()
+        # 5) update target unknown anchors
+        self._update_unknown_anchors(feat_t, unknown_mask, unknown_label_local)
+
+        # 6) unified anchor contrast
+        loss_contrast = self._unified_anchor_contrast(
+            feat_t,
+            known_mask,
+            known_label,
+            unknown_mask,
+            unknown_label_local
+        )
+
+        log_vars['loss_contrast'] = loss_contrast.item()
+        log_vars['num_known_pixels'] = known_mask.sum().item()
+        log_vars['num_unknown_pixels'] = unknown_mask.sum().item()
 
         total_loss = (
-                loss_seg_s +
-                loss_seg_t +
-                self.loss_karc_weight * loss_karc +
-                self.loss_uarc_weight * loss_uarc +
-                loss_unknown_seg  # 加入总损失
+            loss_seg_s +
+            loss_seg_t +
+            self.loss_contrast_weight * loss_contrast
         )
 
         total_loss.backward()
@@ -234,7 +235,7 @@ class OSNet(BaseSegmentor):
         gt = gt_s.squeeze(1)
         for cls_id in range(len(self.source_classes)):
             mask = (gt == cls_id)
-            if mask.sum() < 10:
+            if mask.sum() < self.min_pixels_per_anchor:
                 continue
             cls_feat = feat_s.permute(0, 2, 3, 1)[mask]
             cls_anchor = cls_feat.mean(dim=0)
@@ -245,7 +246,41 @@ class OSNet(BaseSegmentor):
                 dim=0
             )
 
+    @torch.no_grad()
+    def _update_unknown_anchors(self, feat_t, unknown_mask, unknown_label_local):
+        if self.unknown_anchors.shape[0] == 0:
+            return
+
+        feat_t = resize(
+            feat_t,
+            size=unknown_mask.shape[1:],
+            mode='bilinear',
+            align_corners=self.align_corners)
+
+        feat_flat = feat_t.permute(0, 2, 3, 1)
+
+        for u in range(self.unknown_anchors.shape[0]):
+            mask = unknown_mask & (unknown_label_local == u)
+            if mask.sum() < self.min_pixels_per_anchor:
+                continue
+
+            cls_feat = feat_flat[mask]
+            cls_anchor = cls_feat.mean(dim=0)
+            cls_anchor = F.normalize(cls_anchor, dim=0)
+            self.unknown_anchors[u] = F.normalize(
+                self.proto_momentum * self.unknown_anchors[u] +
+                (1.0 - self.proto_momentum) * cls_anchor,
+                dim=0
+            )
+
     def _mine_target_masks(self, pred_src_full, pred_tgt):
+        """
+        Return:
+            known_mask: [B,H,W]
+            known_label: local known class ids in [0, Ks-1]
+            unknown_mask: [B,H,W]
+            unknown_label_local: local unknown class ids in [0, Ku-1]
+        """
         prob_src = F.softmax(pred_src_full, dim=1)
         prob_tgt = F.softmax(pred_tgt, dim=1)
 
@@ -258,102 +293,82 @@ class OSNet(BaseSegmentor):
         discrepancy = torch.mean(torch.abs(src_share - tgt_share), dim=1)
 
         known_mask = (
-                (src_cls_local == tgt_cls_local) &
-                (src_conf > self.known_conf_thresh) &
-                (discrepancy < self.discrepancy_thresh)
+            (src_cls_local == tgt_cls_local) &
+            (src_conf > self.known_conf_thresh) &
+            (discrepancy < self.discrepancy_thresh)
         )
         known_label = src_cls_local
 
-        # ====================== 多未知类核心修改 ======================
+        unknown_mask = (
+            (src_conf < self.known_conf_thresh) |
+            (discrepancy > self.discrepancy_thresh)
+        ) & (~known_mask)
+
         if len(self.unknown_idx) > 0:
-            # 条件不变：不确定 / 不一致 → 未知
-            unknown_mask = (
-                    (src_conf < self.known_conf_thresh) |
-                    (discrepancy > self.discrepancy_thresh)
-            )
-
-            # ============== 关键：自动取目标域预测的未知类标签 ==============
-            # 取出所有未知类的概率 → 取最大作为伪标签
-            prob_tgt_unknown = prob_tgt[:, self.unknown_idx, :, :]
-            _, pred_unknown_local = torch.max(prob_tgt_unknown, dim=1)
-            unknown_label = self.unknown_idx[pred_unknown_local]
-
+            prob_tgt_unknown = prob_tgt[:, self.unknown_idx, :, :]  # [B, Ku, H, W]
+            _, unknown_label_local = torch.max(prob_tgt_unknown, dim=1)
         else:
-            unknown_mask = (src_conf < self.known_conf_thresh) | (discrepancy > self.discrepancy_thresh)
-            unknown_label = torch.full_like(known_label, 255)  # 无未知类时忽略
-        # ===============================================================
+            unknown_label_local = torch.zeros_like(known_label)
 
-        return known_mask, known_label, unknown_mask, unknown_label
+        return known_mask, known_label, unknown_mask, unknown_label_local
+
     def _sample_vectors(self, feat_map, mask, labels=None, max_samples=4096):
-        """
-        feat_map: [B, C, H, W]
-        mask: [B, H, W]
-        labels: [B, H, W] or None
-        """
         feat_map = resize(
             feat_map,
             size=mask.shape[1:],
             mode='bilinear',
             align_corners=self.align_corners)
 
-        feat_vec = feat_map.permute(0, 2, 3, 1)[mask]  # [N, C]
+        feat_vec = feat_map.permute(0, 2, 3, 1)[mask]
 
         if feat_vec.shape[0] == 0:
-            if labels is None:
-                return None, None
             return None, None
 
         if feat_vec.shape[0] > max_samples:
             idx = torch.randperm(feat_vec.shape[0], device=feat_vec.device)[:max_samples]
             feat_vec = feat_vec[idx]
-            if labels is not None:
-                label_vec = labels[mask][idx]
-            else:
-                label_vec = None
+            label_vec = labels[mask][idx] if labels is not None else None
         else:
-            if labels is not None:
-                label_vec = labels[mask]
-            else:
-                label_vec = None
+            label_vec = labels[mask] if labels is not None else None
 
         return feat_vec, label_vec
 
-    def _known_anchor_relation_contrast(self, feat_t, known_mask, known_label):
-        """
-        K-ARC:
-        target-known pixel vs source-known anchors
-        positive anchor = corresponding class anchor
-        negative anchors = all other known anchors
-        """
-        feat_vec, label_vec = self._sample_vectors(
-            feat_t, known_mask, known_label, self.max_samples)
+    def _unified_anchor_contrast(self,
+                                 feat_t,
+                                 known_mask,
+                                 known_label,
+                                 unknown_mask,
+                                 unknown_label_local):
+        known_feat, known_targets = self._sample_vectors(
+            feat_t, known_mask, known_label, self.max_samples // 2)
 
-        if feat_vec is None or feat_vec.shape[0] < 1:
+        unknown_feat, unknown_targets_local = self._sample_vectors(
+            feat_t, unknown_mask, unknown_label_local, self.max_samples // 2)
+
+        feat_list = []
+        target_list = []
+
+        num_known = self.known_anchors.shape[0]
+        num_unknown = self.unknown_anchors.shape[0]
+
+        if known_feat is not None and known_feat.shape[0] > 0:
+            feat_list.append(known_feat)
+            target_list.append(known_targets)
+
+        if unknown_feat is not None and unknown_feat.shape[0] > 0 and num_unknown > 0:
+            feat_list.append(unknown_feat)
+            target_list.append(unknown_targets_local + num_known)
+
+        if len(feat_list) == 0:
             return feat_t.sum() * 0.0
 
-        logits = torch.matmul(feat_vec, self.known_anchors.t())  # [N, K]
-        logits = logits / self.tau_known
+        feat_all = torch.cat(feat_list, dim=0)
+        target_all = torch.cat(target_list, dim=0)
 
-        loss = F.cross_entropy(logits, label_vec)
-        return loss
+        all_anchors = torch.cat([self.known_anchors, self.unknown_anchors], dim=0)
+        logits = torch.matmul(feat_all, all_anchors.t()) / self.tau_unified
+        loss = F.cross_entropy(logits, target_all)
 
-    def _unknown_anchor_relation_contrast(self, feat_t, unknown_mask):
-        """
-        U-ARC:
-        target-unknown pixels have no positive anchor.
-        We propose an anchor-free negative contrast:
-            log(1 + sum_j exp((sim(f, c_j)-m)/tau))
-        """
-        feat_vec, _ = self._sample_vectors(
-            feat_t, unknown_mask, labels=None, max_samples=self.max_samples)
-
-        if feat_vec is None or feat_vec.shape[0] < 1:
-            return feat_t.sum() * 0.0
-
-        logits = torch.matmul(feat_vec, self.known_anchors.t())  # [N, K]
-        logits = (logits - self.unknown_margin) / self.tau_unknown
-
-        loss = torch.log1p(torch.exp(logits).sum(dim=1)).mean()
         return loss
 
     def _init_decode_head(self, decode_head):
@@ -396,6 +411,7 @@ class OSNet(BaseSegmentor):
 
     def _get_segmentor_loss(self, decode_head, pred, gt_semantic_seg, gt_weight=None):
         losses = dict()
+        # 保持兼容，如果你的 head 不支持 gt_weight，可以去掉这个参数
         loss_seg = decode_head.losses(pred, gt_semantic_seg, gt_weight=gt_weight)
         losses.update(loss_seg)
         loss_seg, log_vars_seg = self._parse_losses(losses)

@@ -87,18 +87,15 @@ model = dict(
         momentum=0.99,
 
         known_conf_thresh=0.9,
-        unknown_conf_thresh=0.45,
+        unknown_pseudo_thresh=0.6,
         discrepancy_thresh=0.15,
 
-        tau_known=0.07,
-        tau_unknown=0.07,
-        unknown_margin=0.2,
+        tau_unified=0.07,
 
-        loss_karc_weight=1.0,
-        loss_uarc_weight=1.0,
-        loss_unknown_seg_weight=0.05,
+        loss_contrast_weight=0.1,
 
         max_samples=4096,
+        min_pixels_per_anchor=10
     ),
 
     train_cfg=dict(),
