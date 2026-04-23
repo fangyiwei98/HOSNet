@@ -12,12 +12,11 @@ from .base import BaseSegmentor
 @SEGMENTORS.register_module()
 class OSNet(BaseSegmentor):
     """
-    Unified-Anchor OSNet for Open-set Domain Adaptive Segmentation
+    Decoupled OSNet for Open-set Domain Adaptive Segmentation
 
-    Main changes:
-    1) Remove unknown segmentation pseudo-label loss.
-    2) Merge known/unknown contrast into one unified anchor contrastive loss.
-    3) Build virtual anchors for multiple unknown classes and update them online.
+    Fixes included:
+    1) unknown seg loss for Ku=1 uses BCE instead of CE
+    2) inference uses known/unknown gating rather than naive concatenation
     """
 
     def __init__(self,
@@ -42,6 +41,9 @@ class OSNet(BaseSegmentor):
         unknown_indices = [i for i, c in enumerate(target_classes) if c not in source_classes]
 
         self.unknown_indices = unknown_indices
+        self.num_known_classes = len(source_classes)
+        self.num_unknown_classes = len(unknown_indices)
+        self.num_classes = len(target_classes)
 
         self.register_buffer(
             'source_to_target_idx',
@@ -60,7 +62,6 @@ class OSNet(BaseSegmentor):
         self.decode_head_s = self._init_decode_head(decode_head_s)
         self.decode_head_t = self._init_decode_head(decode_head_t)
 
-        self.num_classes = self.decode_head_t.num_classes
         self.align_corners = self.decode_head_t.align_corners
         self.train_cfg = train_cfg
         self.test_cfg = test_cfg
@@ -79,10 +80,20 @@ class OSNet(BaseSegmentor):
         self.discrepancy_thresh = contrast_cfg.get('discrepancy_thresh', 0.2)
 
         self.tau_unified = contrast_cfg.get('tau_unified', 0.07)
+
         self.loss_contrast_weight = contrast_cfg.get('loss_contrast_weight', 1.0)
+        self.loss_unknown_seg_weight = contrast_cfg.get('loss_unknown_seg_weight', 0.5)
 
         self.max_samples = contrast_cfg.get('max_samples', 4096)
         self.min_pixels_per_anchor = contrast_cfg.get('min_pixels_per_anchor', 10)
+
+        self.unknown_pseudo_thresh = contrast_cfg.get('unknown_pseudo_thresh', 0.0)
+
+        # inference gating
+        self.infer_known_conf_thresh = contrast_cfg.get(
+            'infer_known_conf_thresh', self.known_conf_thresh)
+        self.infer_unknown_logit_bias = contrast_cfg.get(
+            'infer_unknown_logit_bias', 0.0)
 
         in_channels = self.decode_head_s.in_channels
         if isinstance(in_channels, (list, tuple)):
@@ -133,53 +144,58 @@ class OSNet(BaseSegmentor):
         F_t = self.forward_backbone(self.backbone_s, img_t)
 
         P_s_src = self.forward_decode_head(self.decode_head_s, F_s)
-        P_s_tgt = self.forward_decode_head(self.decode_head_t, F_s)
-
+        P_s_tgt_known = self.forward_decode_head(self.decode_head_t, F_s)
         P_t_src = self.forward_decode_head(self.decode_head_s, F_t)
-        P_t_tgt = self.forward_decode_head(self.decode_head_t, F_t)
 
-        # 1) source supervised seg
+        feat_t_head, P_t_tgt_known, P_t_tgt_unknown = self.forward_decode_head_decoupled(
+            self.decode_head_t, F_t)
+
         loss_seg_s, log_seg_s = self._get_segmentor_loss(
             self.decode_head_s, P_s_src, gt_s)
         log_vars.update(self._rename_log(log_seg_s, '_seg_s'))
 
-        gt_s_target = self._remap_source_gt_to_target(gt_s)
-        loss_seg_t, log_seg_t = self._get_segmentor_loss(
-            self.decode_head_t, P_s_tgt, gt_s_target)
+        gt_s_target_known = self._remap_source_gt_to_target_known(gt_s)
+        loss_seg_t, log_seg_t = self._get_known_branch_loss(
+            P_s_tgt_known, gt_s_target_known)
         log_vars.update(self._rename_log(log_seg_t, '_seg_t'))
 
-        # 2) project features
         feat_s = self._project_feature(F_s[-1])
-        feat_t = self._project_feature(F_t[-1])
+        feat_t_contrast = self._project_feature(F_t[-1].detach())
 
-        # 3) update source known anchors
         self._update_known_anchors(feat_s, gt_s)
 
-        # 4) mine target known / unknown masks
-        P_t_src_full = self._scatter_source_logits_to_target(P_t_src)
-        known_mask, known_label, unknown_mask, unknown_label_local = \
-            self._mine_target_masks(P_t_src_full, P_t_tgt)
+        P_t_src_full = self._scatter_source_logits_to_target_known(P_t_src)
+        known_mask, known_label, unknown_region_mask = \
+            self._mine_target_masks(P_t_src_full, P_t_tgt_known)
 
-        # 5) update target unknown anchors
-        self._update_unknown_anchors(feat_t, unknown_mask, unknown_label_local)
+        unknown_mask, unknown_label_local, unknown_conf = \
+            self._generate_unknown_pseudo_labels_from_head(
+                pred_tgt_unknown=P_t_tgt_unknown,
+                unknown_region_mask=unknown_region_mask
+            )
 
-        # 6) unified anchor contrast
+        self._update_unknown_anchors_from_pseudo(
+            feat_t_contrast, unknown_mask, unknown_label_local)
+
         loss_contrast = self._unified_anchor_contrast(
-            feat_t,
+            feat_t_contrast,
             known_mask,
             known_label,
             unknown_mask,
             unknown_label_local
         )
 
-        log_vars['loss_contrast'] = loss_contrast.item()
-        log_vars['num_known_pixels'] = known_mask.sum().item()
-        log_vars['num_unknown_pixels'] = unknown_mask.sum().item()
+        loss_unknown_seg = self._unknown_pseudo_seg_loss(
+            pred_tgt_unknown=P_t_tgt_unknown,
+            unknown_mask=unknown_mask,
+            unknown_label_local=unknown_label_local
+        )
 
         total_loss = (
             loss_seg_s +
             loss_seg_t +
-            self.loss_contrast_weight * loss_contrast
+            self.loss_contrast_weight * loss_contrast +
+            self.loss_unknown_seg_weight * loss_unknown_seg
         )
 
         total_loss.backward()
@@ -189,6 +205,17 @@ class OSNet(BaseSegmentor):
         optimizer['decode_head_t'].step()
         if 'feat_proj' in optimizer:
             optimizer['feat_proj'].step()
+
+        log_vars['loss_contrast'] = loss_contrast.item()
+        log_vars['loss_unknown_seg'] = loss_unknown_seg.item()
+        log_vars['num_known_pixels'] = known_mask.sum().item()
+        log_vars['num_unknown_region_pixels'] = unknown_region_mask.sum().item()
+        log_vars['num_unknown_pixels'] = unknown_mask.sum().item()
+
+        if unknown_mask.sum() > 0:
+            log_vars['unknown_pseudo_conf'] = unknown_conf[unknown_mask].mean().item()
+        else:
+            log_vars['unknown_pseudo_conf'] = 0.0
 
         self.iteration += 1
 
@@ -210,19 +237,16 @@ class OSNet(BaseSegmentor):
         feat = F.normalize(feat, dim=1)
         return feat
 
-    def _remap_source_gt_to_target(self, gt_s):
+    def _remap_source_gt_to_target_known(self, gt_s):
         gt_new = gt_s.clone()
         valid_mask = (gt_new != 255)
         mapped = torch.full_like(gt_new, 255)
-        for s_idx, t_idx in enumerate(self.source_to_target_idx):
-            mapped[(gt_new == s_idx) & valid_mask] = t_idx
+        for s_idx in range(len(self.source_classes)):
+            mapped[(gt_new == s_idx) & valid_mask] = s_idx
         return mapped
 
-    def _scatter_source_logits_to_target(self, pred_s):
-        B, _, H, W = pred_s.shape
-        out = pred_s.new_full((B, len(self.target_classes), H, W), -100.0)
-        out[:, self.source_to_target_idx, :, :] = pred_s
-        return out
+    def _scatter_source_logits_to_target_known(self, pred_s):
+        return pred_s
 
     @torch.no_grad()
     def _update_known_anchors(self, feat_s, gt_s):
@@ -247,7 +271,36 @@ class OSNet(BaseSegmentor):
             )
 
     @torch.no_grad()
-    def _update_unknown_anchors(self, feat_t, unknown_mask, unknown_label_local):
+    def _generate_unknown_pseudo_labels_from_head(self, pred_tgt_unknown, unknown_region_mask):
+        """
+        For Ku=1, directly use unknown_region_mask as pseudo unknown mask.
+        """
+        if pred_tgt_unknown.shape[1] == 0:
+            dummy_label = torch.zeros_like(unknown_region_mask, dtype=torch.long)
+            dummy_conf = torch.zeros_like(unknown_region_mask, dtype=pred_tgt_unknown.dtype)
+            return torch.zeros_like(unknown_region_mask, dtype=torch.bool), dummy_label, dummy_conf
+
+        pred_tgt_unknown = resize(
+            pred_tgt_unknown,
+            size=unknown_region_mask.shape[1:],
+            mode='bilinear',
+            align_corners=self.align_corners)
+
+        # single unknown class: softmax confidence is meaningless (always 1)
+        if pred_tgt_unknown.shape[1] == 1:
+            unknown_label_local = torch.zeros_like(unknown_region_mask, dtype=torch.long)
+            unknown_conf = torch.ones_like(unknown_region_mask, dtype=pred_tgt_unknown.dtype)
+            unknown_mask = unknown_region_mask
+            return unknown_mask, unknown_label_local, unknown_conf
+
+        prob_unknown = F.softmax(pred_tgt_unknown, dim=1)
+        unknown_conf, unknown_label_local = torch.max(prob_unknown, dim=1)
+        unknown_mask = unknown_region_mask & (unknown_conf > self.unknown_pseudo_thresh)
+
+        return unknown_mask, unknown_label_local, unknown_conf
+
+    @torch.no_grad()
+    def _update_unknown_anchors_from_pseudo(self, feat_t, unknown_mask, unknown_label_local):
         if self.unknown_anchors.shape[0] == 0:
             return
 
@@ -273,24 +326,14 @@ class OSNet(BaseSegmentor):
                 dim=0
             )
 
-    def _mine_target_masks(self, pred_src_full, pred_tgt):
-        """
-        Return:
-            known_mask: [B,H,W]
-            known_label: local known class ids in [0, Ks-1]
-            unknown_mask: [B,H,W]
-            unknown_label_local: local unknown class ids in [0, Ku-1]
-        """
-        prob_src = F.softmax(pred_src_full, dim=1)
-        prob_tgt = F.softmax(pred_tgt, dim=1)
+    def _mine_target_masks(self, pred_src_known, pred_tgt_known):
+        prob_src = F.softmax(pred_src_known, dim=1)
+        prob_tgt = F.softmax(pred_tgt_known, dim=1)
 
-        src_share = prob_src[:, self.source_to_target_idx, :, :]
-        tgt_share = prob_tgt[:, self.source_to_target_idx, :, :]
+        src_conf, src_cls_local = torch.max(prob_src, dim=1)
+        tgt_conf, tgt_cls_local = torch.max(prob_tgt, dim=1)
 
-        src_conf, src_cls_local = torch.max(src_share, dim=1)
-        tgt_conf, tgt_cls_local = torch.max(tgt_share, dim=1)
-
-        discrepancy = torch.mean(torch.abs(src_share - tgt_share), dim=1)
+        discrepancy = torch.mean(torch.abs(prob_src - prob_tgt), dim=1)
 
         known_mask = (
             (src_cls_local == tgt_cls_local) &
@@ -299,18 +342,12 @@ class OSNet(BaseSegmentor):
         )
         known_label = src_cls_local
 
-        unknown_mask = (
+        unknown_region_mask = (
             (src_conf < self.known_conf_thresh) |
             (discrepancy > self.discrepancy_thresh)
         ) & (~known_mask)
 
-        if len(self.unknown_idx) > 0:
-            prob_tgt_unknown = prob_tgt[:, self.unknown_idx, :, :]  # [B, Ku, H, W]
-            _, unknown_label_local = torch.max(prob_tgt_unknown, dim=1)
-        else:
-            unknown_label_local = torch.zeros_like(known_label)
-
-        return known_mask, known_label, unknown_mask, unknown_label_local
+        return known_mask, known_label, unknown_region_mask
 
     def _sample_vectors(self, feat_map, mask, labels=None, max_samples=4096):
         feat_map = resize(
@@ -366,10 +403,61 @@ class OSNet(BaseSegmentor):
         target_all = torch.cat(target_list, dim=0)
 
         all_anchors = torch.cat([self.known_anchors, self.unknown_anchors], dim=0)
+        all_anchors = F.normalize(all_anchors, dim=1)
+
         logits = torch.matmul(feat_all, all_anchors.t()) / self.tau_unified
         loss = F.cross_entropy(logits, target_all)
 
         return loss
+
+    def _unknown_pseudo_seg_loss(self, pred_tgt_unknown, unknown_mask, unknown_label_local):
+        """
+        Fix:
+        - Ku == 0: zero loss
+        - Ku == 1: BCEWithLogits on unknown mask
+        - Ku > 1: CE on local unknown labels
+        """
+        num_unknown = pred_tgt_unknown.shape[1]
+        if num_unknown == 0:
+            return pred_tgt_unknown.sum() * 0.0
+
+        pred_tgt_unknown = resize(
+            pred_tgt_unknown,
+            size=unknown_mask.shape[1:],
+            mode='bilinear',
+            align_corners=self.align_corners)
+
+        if unknown_mask.sum() == 0:
+            return pred_tgt_unknown.sum() * 0.0
+
+        # single unknown class -> BCE
+        if num_unknown == 1:
+            logits = pred_tgt_unknown[:, 0, :, :]
+            target = unknown_mask.float()
+            valid = unknown_mask  # only supervise mined unknown pixels
+
+            if valid.sum() == 0:
+                return logits.sum() * 0.0
+
+            loss_map = F.binary_cross_entropy_with_logits(
+                logits, target, reduction='none')
+
+            loss = loss_map[valid].mean()
+            return loss
+
+        # multi-unknown class -> CE
+        pseudo_gt = torch.full_like(unknown_label_local, 255)
+        pseudo_gt[unknown_mask] = unknown_label_local[unknown_mask]
+
+        if (pseudo_gt != 255).sum() == 0:
+            return pred_tgt_unknown.sum() * 0.0
+
+        return F.cross_entropy(
+            pred_tgt_unknown,
+            pseudo_gt,
+            ignore_index=255,
+            reduction='mean'
+        )
 
     def _init_decode_head(self, decode_head):
         return builder.build_head(decode_head)
@@ -383,15 +471,88 @@ class OSNet(BaseSegmentor):
     def extract_feat(self, img):
         return self.backbone_s(img)
 
+    def _merge_known_unknown_logits_with_gate(self, P_t_known, P_t_unknown):
+        """
+        Gated fusion for inference:
+        - known area: only known logits are active
+        - unknown area: only unknown logits are active
+        """
+        B, _, H, W = P_t_known.shape
+        device = P_t_known.device
+        dtype = P_t_known.dtype
+
+        full_logits = torch.full(
+            (B, self.num_classes, H, W),
+            -100.0,
+            device=device,
+            dtype=dtype
+        )
+
+        # fill known logits to global class positions
+        full_logits[:, self.source_to_target_idx, :, :] = P_t_known
+
+        if self.num_unknown_classes > 0 and P_t_unknown.shape[1] > 0:
+            full_logits[:, self.unknown_idx, :, :] = P_t_unknown + self.infer_unknown_logit_bias
+
+        known_prob = F.softmax(P_t_known, dim=1)
+        known_conf, _ = torch.max(known_prob, dim=1)
+
+        # low-confidence known => route to unknown
+        unknown_gate = (known_conf < self.infer_known_conf_thresh)
+        known_gate = ~unknown_gate
+
+        if self.num_unknown_classes > 0:
+            known_idx = self.source_to_target_idx
+            unknown_idx = self.unknown_idx
+
+            known_mask_expand = known_gate.unsqueeze(1).expand(-1, len(known_idx), -1, -1)
+            unknown_mask_expand = unknown_gate.unsqueeze(1).expand(-1, len(unknown_idx), -1, -1)
+
+            # in unknown region, suppress known classes
+            full_logits[:, known_idx, :, :] = torch.where(
+                known_mask_expand,
+                full_logits[:, known_idx, :, :],
+                torch.full_like(full_logits[:, known_idx, :, :], -100.0)
+            )
+
+            # in known region, suppress unknown classes
+            full_logits[:, unknown_idx, :, :] = torch.where(
+                unknown_mask_expand,
+                full_logits[:, unknown_idx, :, :],
+                torch.full_like(full_logits[:, unknown_idx, :, :], -100.0)
+            )
+
+        return full_logits
+
     def encode_decode(self, img, img_metas):
         F_t = self.forward_backbone(self.backbone_s, img)
-        P_t = self.forward_decode_head(self.decode_head_t, F_t)
-        out = resize(
-            input=P_t,
-            size=img.shape[2:],
-            mode='bilinear',
-            align_corners=self.align_corners)
-        return out
+
+        if hasattr(self.decode_head_t, 'forward_decoupled'):
+            _, P_t_known, P_t_unknown = self.decode_head_t.forward_decoupled(F_t)
+
+            P_t_known = resize(
+                input=P_t_known,
+                size=img.shape[2:],
+                mode='bilinear',
+                align_corners=self.align_corners)
+
+            if P_t_unknown.shape[1] > 0:
+                P_t_unknown = resize(
+                    input=P_t_unknown,
+                    size=img.shape[2:],
+                    mode='bilinear',
+                    align_corners=self.align_corners)
+
+            P_t = self._merge_known_unknown_logits_with_gate(P_t_known, P_t_unknown)
+        else:
+            P_t = self.forward_decode_head(self.decode_head_t, F_t)
+            P_t = resize(
+                input=P_t,
+                size=img.shape[2:],
+                mode='bilinear',
+                align_corners=self.align_corners)
+
+        return P_t
 
     def _decode_head_forward_test(self, x, img_metas):
         seg_logits = self.decode_head_t.forward_test(x, img_metas, self.test_cfg)
@@ -406,14 +567,44 @@ class OSNet(BaseSegmentor):
     def forward_decode_head(self, decode_head, feature):
         return decode_head(feature)
 
+    def forward_decode_head_decoupled(self, decode_head, feature):
+        if hasattr(decode_head, 'forward_decoupled'):
+            return decode_head.forward_decoupled(feature)
+        else:
+            pred = decode_head(feature)
+            return feature[-1], pred, pred[:, :0]
+
     def forward_train(self, img, B_img):
         pass
 
     def _get_segmentor_loss(self, decode_head, pred, gt_semantic_seg, gt_weight=None):
         losses = dict()
-        # 保持兼容，如果你的 head 不支持 gt_weight，可以去掉这个参数
         loss_seg = decode_head.losses(pred, gt_semantic_seg, gt_weight=gt_weight)
         losses.update(loss_seg)
+        loss_seg, log_vars_seg = self._parse_losses(losses)
+        return loss_seg, log_vars_seg
+
+    def _get_known_branch_loss(self, pred, gt_semantic_seg, gt_weight=None):
+        pred = resize(
+            input=pred,
+            size=gt_semantic_seg.shape[2:],
+            mode='bilinear',
+            align_corners=self.align_corners)
+
+        seg_label = gt_semantic_seg.squeeze(1)
+
+        losses = dict()
+        loss = self.decode_head_t.loss_decode(
+            pred,
+            seg_label,
+            weight=gt_weight,
+            ignore_index=255)
+
+        if isinstance(loss, dict):
+            losses.update(loss)
+        else:
+            losses['loss_seg'] = loss
+
         loss_seg, log_vars_seg = self._parse_losses(losses)
         return loss_seg, log_vars_seg
 
