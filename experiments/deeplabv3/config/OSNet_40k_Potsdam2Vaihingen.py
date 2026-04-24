@@ -94,17 +94,17 @@ model = dict(
     contrast_cfg=dict(
         proj_dim=256,
         momentum=0.99,
-        known_conf_thresh=0.5,
+        known_conf_thresh=0.7,
         discrepancy_thresh=0.2,
         tau_unified=0.07,
         loss_contrast_weight=0.1,
-        loss_unknown_seg_weight=1.0,
+        loss_unknown_seg_weight=0.1,
         max_samples=4096,
         min_pixels_per_anchor=10,
         unknown_pseudo_thresh=0.0,
 
         # new
-        infer_known_conf_thresh=0.5,
+        infer_known_conf_thresh=0.7,
         infer_unknown_logit_bias=0.0,
 
         balance_unknown_pseudo=True,

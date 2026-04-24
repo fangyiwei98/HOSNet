@@ -193,6 +193,7 @@ class OSNet(BaseSegmentor):
             unknown_label_local
         )
 
+
         loss_unknown_seg = self._unknown_pseudo_seg_loss(
             pred_tgt_unknown=P_t_tgt_unknown,
             unknown_mask=unknown_mask,
@@ -515,11 +516,12 @@ class OSNet(BaseSegmentor):
         feat_all = torch.cat(feat_list, dim=0)
         target_all = torch.cat(target_list, dim=0)
 
-        all_anchors = torch.cat([self.known_anchors, self.unknown_anchors], dim=0)
-        all_anchors = F.normalize(all_anchors, dim=1)
-
-        logits = torch.matmul(feat_all, all_anchors.t()) / self.tau_unified
-        loss = F.cross_entropy(logits, target_all)
+        # all_anchors = torch.cat([self.known_anchors, self.unknown_anchors], dim=0)
+        # all_anchors = F.normalize(all_anchors, dim=1)
+        #
+        # logits = torch.matmul(feat_all, all_anchors.t()) / self.tau_unified
+        # loss = F.cross_entropy(logits, target_all)
+        loss = self.supcon_loss_function(feat_all, target_all, self.tau_unified)
 
         return loss
 
@@ -571,6 +573,30 @@ class OSNet(BaseSegmentor):
             ignore_index=255,
             reduction='mean'
         )
+
+    def supcon_loss_function(self, features, labels, temperature=0.07):
+        """纯函数版 SupCon Loss，和你的 _unknown_pseudo_seg_loss 风格完全一样"""
+        device = features.device
+        N = features.shape[0]
+
+        # 同类掩码
+        mask = torch.eq(labels.view(N, 1), labels.view(1, N)).float().to(device)
+
+        # 相似度矩阵
+        sim = torch.matmul(features, features.T) / temperature
+
+        # 去掉自身
+        logits_mask = 1.0 - torch.eye(N, device=device)
+        mask = mask * logits_mask
+
+        # 计算 SupCon
+        exp_sim = torch.exp(sim) * logits_mask
+        log_prob = sim - torch.log(exp_sim.sum(1, keepdim=True) + 1e-8)
+        mean_log_prob = (mask * log_prob).sum(1) / (mask.sum(1) + 1e-8)
+        loss = -mean_log_prob.mean()
+
+        return loss
+
 
     def _init_decode_head(self, decode_head):
         return builder.build_head(decode_head)
