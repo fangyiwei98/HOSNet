@@ -5,7 +5,7 @@ _base_ = [
 
 source_included_classes = [
     'impervious_surface', 'building',
-    'tree', 'car', 'clutter'
+    'tree', 'clutter'
 ]
 target_included_classes = [
     'impervious_surface', 'building', 'low_vegetation',
@@ -94,18 +94,23 @@ model = dict(
     contrast_cfg=dict(
         proj_dim=256,
         momentum=0.99,
-        known_conf_thresh=0.7,
+        known_conf_thresh=0.5,
         discrepancy_thresh=0.2,
         tau_unified=0.07,
         loss_contrast_weight=0.1,
-        loss_unknown_seg_weight=0.5,
+        loss_unknown_seg_weight=1.0,
         max_samples=4096,
         min_pixels_per_anchor=10,
         unknown_pseudo_thresh=0.0,
 
         # new
-        infer_known_conf_thresh=0.7,
+        infer_known_conf_thresh=0.5,
         infer_unknown_logit_bias=0.0,
+
+        balance_unknown_pseudo=True,
+        unknown_balance_ratio=0.5,
+        min_unknown_pixels_per_class=16,
+        unknown_balance_warmup_iters=4000,
     ),
 
     train_cfg=dict(),

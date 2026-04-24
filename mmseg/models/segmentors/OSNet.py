@@ -17,6 +17,8 @@ class OSNet(BaseSegmentor):
     Fixes included:
     1) unknown seg loss for Ku=1 uses BCE instead of CE
     2) inference uses known/unknown gating rather than naive concatenation
+    3) multi-unknown balanced pseudo labeling to avoid unknown-class collapse
+       and prevent some unknown-class IoU from staying at 0
     """
 
     def __init__(self,
@@ -94,6 +96,12 @@ class OSNet(BaseSegmentor):
             'infer_known_conf_thresh', self.known_conf_thresh)
         self.infer_unknown_logit_bias = contrast_cfg.get(
             'infer_unknown_logit_bias', 0.0)
+
+        # balanced pseudo labeling for multiple unknown classes
+        self.balance_unknown_pseudo = contrast_cfg.get('balance_unknown_pseudo', True)
+        self.unknown_balance_ratio = contrast_cfg.get('unknown_balance_ratio', 0.5)
+        self.min_unknown_pixels_per_class = contrast_cfg.get('min_unknown_pixels_per_class', 16)
+        self.unknown_balance_warmup_iters = contrast_cfg.get('unknown_balance_warmup_iters', 4000)
 
         in_channels = self.decode_head_s.in_channels
         if isinstance(in_channels, (list, tuple)):
@@ -217,6 +225,13 @@ class OSNet(BaseSegmentor):
         else:
             log_vars['unknown_pseudo_conf'] = 0.0
 
+        # monitor unknown class usage
+        if self.num_unknown_classes > 1 and unknown_mask.sum() > 0:
+            for u in range(self.num_unknown_classes):
+                log_vars[f'num_unknown_cls_{u}_pixels'] = (
+                    (unknown_mask & (unknown_label_local == u)).sum().item()
+                )
+
         self.iteration += 1
 
         outputs = dict(
@@ -271,9 +286,107 @@ class OSNet(BaseSegmentor):
             )
 
     @torch.no_grad()
+    def _balanced_unknown_assignment(self, prob_unknown, unknown_region_mask):
+        """
+        Balanced pseudo labeling for multiple unknown classes.
+
+        Goal:
+        avoid collapse where only a subset of unknown classes receives pseudo labels,
+        causing some unknown-class IoU to stay 0 forever.
+        """
+        B, Ku, H, W = prob_unknown.shape
+        device = prob_unknown.device
+
+        # default outputs
+        unknown_label_local = torch.zeros((B, H, W), dtype=torch.long, device=device)
+        unknown_conf = torch.zeros((B, H, W), dtype=prob_unknown.dtype, device=device)
+        unknown_mask = torch.zeros((B, H, W), dtype=torch.bool, device=device)
+
+        base_conf, base_label = torch.max(prob_unknown, dim=1)
+
+        use_balance = self.balance_unknown_pseudo and (Ku > 1)
+        if hasattr(self, 'iteration'):
+            if self.iteration > self.unknown_balance_warmup_iters:
+                # after warmup still keep balancing, but weaker
+                effective_ratio = self.unknown_balance_ratio * 0.5
+            else:
+                effective_ratio = self.unknown_balance_ratio
+        else:
+            effective_ratio = self.unknown_balance_ratio
+
+        for b in range(B):
+            region_mask_b = unknown_region_mask[b]
+            n_region = int(region_mask_b.sum().item())
+
+            if n_region == 0:
+                continue
+
+            base_conf_b = base_conf[b]
+            base_label_b = base_label[b]
+
+            # start from regular argmax assignment
+            assigned_label = base_label_b.clone()
+            assigned_conf = base_conf_b.clone()
+
+            if use_balance:
+                # flatten unknown region
+                region_idx = torch.nonzero(region_mask_b.view(-1), as_tuple=False).squeeze(1)
+                if region_idx.numel() > 0:
+                    prob_b = prob_unknown[b].permute(1, 2, 0).reshape(-1, Ku)[region_idx]  # [N, Ku]
+
+                    quota = max(
+                        self.min_unknown_pixels_per_class,
+                        int(effective_ratio * n_region / Ku)
+                    )
+                    quota = min(quota, n_region)
+
+                    # store best forced assignment per pixel
+                    forced_score = torch.full((region_idx.numel(),), -1.0, device=device, dtype=prob_b.dtype)
+                    forced_label = torch.full((region_idx.numel(),), -1, device=device, dtype=torch.long)
+
+                    for u in range(Ku):
+                        cls_scores = prob_b[:, u]
+                        k = min(quota, cls_scores.numel())
+                        if k <= 0:
+                            continue
+
+                        topk_scores, topk_idx = torch.topk(cls_scores, k=k, largest=True, sorted=False)
+
+                        # if a pixel is selected by multiple classes, keep higher score class
+                        prev = forced_score[topk_idx]
+                        better = topk_scores > prev
+                        if better.any():
+                            better_idx = topk_idx[better]
+                            forced_score[better_idx] = topk_scores[better]
+                            forced_label[better_idx] = u
+
+                    # write back forced assignments
+                    assigned_label_flat = assigned_label.view(-1)
+                    assigned_conf_flat = assigned_conf.view(-1)
+
+                    valid_forced = forced_label >= 0
+                    if valid_forced.any():
+                        forced_global_idx = region_idx[valid_forced]
+                        assigned_label_flat[forced_global_idx] = forced_label[valid_forced]
+                        assigned_conf_flat[forced_global_idx] = forced_score[valid_forced]
+
+                        assigned_label = assigned_label_flat.view(H, W)
+                        assigned_conf = assigned_conf_flat.view(H, W)
+
+            # final valid mask
+            cur_mask = region_mask_b & (assigned_conf > self.unknown_pseudo_thresh)
+
+            unknown_label_local[b] = assigned_label
+            unknown_conf[b] = assigned_conf
+            unknown_mask[b] = cur_mask
+
+        return unknown_mask, unknown_label_local, unknown_conf
+
+    @torch.no_grad()
     def _generate_unknown_pseudo_labels_from_head(self, pred_tgt_unknown, unknown_region_mask):
         """
         For Ku=1, directly use unknown_region_mask as pseudo unknown mask.
+        For Ku>1, use balanced pseudo labeling to avoid class collapse.
         """
         if pred_tgt_unknown.shape[1] == 0:
             dummy_label = torch.zeros_like(unknown_region_mask, dtype=torch.long)
@@ -294,8 +407,8 @@ class OSNet(BaseSegmentor):
             return unknown_mask, unknown_label_local, unknown_conf
 
         prob_unknown = F.softmax(pred_tgt_unknown, dim=1)
-        unknown_conf, unknown_label_local = torch.max(prob_unknown, dim=1)
-        unknown_mask = unknown_region_mask & (unknown_conf > self.unknown_pseudo_thresh)
+        unknown_mask, unknown_label_local, unknown_conf = self._balanced_unknown_assignment(
+            prob_unknown, unknown_region_mask)
 
         return unknown_mask, unknown_label_local, unknown_conf
 
@@ -434,7 +547,7 @@ class OSNet(BaseSegmentor):
         if num_unknown == 1:
             logits = pred_tgt_unknown[:, 0, :, :]
             target = unknown_mask.float()
-            valid = unknown_mask  # only supervise mined unknown pixels
+            valid = unknown_mask
 
             if valid.sum() == 0:
                 return logits.sum() * 0.0
@@ -488,7 +601,6 @@ class OSNet(BaseSegmentor):
             dtype=dtype
         )
 
-        # fill known logits to global class positions
         full_logits[:, self.source_to_target_idx, :, :] = P_t_known
 
         if self.num_unknown_classes > 0 and P_t_unknown.shape[1] > 0:
@@ -497,7 +609,6 @@ class OSNet(BaseSegmentor):
         known_prob = F.softmax(P_t_known, dim=1)
         known_conf, _ = torch.max(known_prob, dim=1)
 
-        # low-confidence known => route to unknown
         unknown_gate = (known_conf < self.infer_known_conf_thresh)
         known_gate = ~unknown_gate
 
@@ -508,14 +619,12 @@ class OSNet(BaseSegmentor):
             known_mask_expand = known_gate.unsqueeze(1).expand(-1, len(known_idx), -1, -1)
             unknown_mask_expand = unknown_gate.unsqueeze(1).expand(-1, len(unknown_idx), -1, -1)
 
-            # in unknown region, suppress known classes
             full_logits[:, known_idx, :, :] = torch.where(
                 known_mask_expand,
                 full_logits[:, known_idx, :, :],
                 torch.full_like(full_logits[:, known_idx, :, :], -100.0)
             )
 
-            # in known region, suppress unknown classes
             full_logits[:, unknown_idx, :, :] = torch.where(
                 unknown_mask_expand,
                 full_logits[:, unknown_idx, :, :],
