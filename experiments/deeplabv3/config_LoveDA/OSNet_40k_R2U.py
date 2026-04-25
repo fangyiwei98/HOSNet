@@ -25,6 +25,11 @@ FULL_CLASS_WEIGHT = {
 
 source_class_weight = [FULL_CLASS_WEIGHT[c] for c in source_included_classes]
 target_class_weight = [FULL_CLASS_WEIGHT[c] for c in target_included_classes]
+unknown_class_weight = [
+    FULL_CLASS_WEIGHT[c]
+    for c in target_included_classes
+    if c not in source_included_classes
+]
 
 norm_cfg = dict(type='SyncBN', requires_grad=True)
 
@@ -66,7 +71,7 @@ model = dict(
     ),
 
     decode_head_t=dict(
-        type='DepthwiseSeparableASPPHead',
+        type='DecoupledOSHead',
         in_channels=2048,
         in_index=3,
         channels=512,
@@ -74,33 +79,41 @@ model = dict(
         c1_in_channels=256,
         c1_channels=48,
         dropout_ratio=0.1,
-        num_classes=len(target_included_classes),
+        num_known_classes=len(source_included_classes),
+        num_unknown_classes=len(target_included_classes) - len(source_included_classes),
+
+        # 建议先保持 True，更稳定
+        detach_unknown_from_trunk=True,
+
         norm_cfg=norm_cfg,
         align_corners=False,
         loss_decode=dict(
             type='CrossEntropyLoss',
             use_sigmoid=False,
             loss_weight=1.0,
-            class_weight=target_class_weight)
+            class_weight=source_class_weight)
     ),
 
     contrast_cfg=dict(
         proj_dim=256,
         momentum=0.99,
-
-        known_conf_thresh=0.9,
-        unknown_conf_thresh=0.45,
-        discrepancy_thresh=0.15,
-
-        tau_known=0.07,
-        tau_unknown=0.07,
-        unknown_margin=0.2,
-
-        loss_karc_weight=1.0,
-        loss_uarc_weight=1.0,
-        loss_unknown_seg_weight=0.05,
-
+        known_conf_thresh=0.7,
+        discrepancy_thresh=0.2,
+        tau_unified=0.07,
+        loss_contrast_weight=0.1,
+        loss_unknown_seg_weight=0.1,
         max_samples=4096,
+        min_pixels_per_anchor=10,
+        unknown_pseudo_thresh=0.0,
+
+        # new
+        infer_known_conf_thresh=0.7,
+        infer_unknown_logit_bias=0.0,
+
+        balance_unknown_pseudo=True,
+        unknown_balance_ratio=0.5,
+        min_unknown_pixels_per_class=16,
+        unknown_balance_warmup_iters=4000,
     ),
 
     train_cfg=dict(),
@@ -123,19 +136,13 @@ optimizer = dict(
 data = dict(
     samples_per_gpu=4,
     workers_per_gpu=4,
-    train=dict(
-        source_included_classes=source_included_classes
-    ),
-    val=dict(
-        source_included_classes=target_included_classes
-    ),
-    test=dict(
-        source_included_classes=target_included_classes
-    )
+    train=dict(source_included_classes=source_included_classes),
+    val=dict(source_included_classes=target_included_classes),
+    test=dict(source_included_classes=target_included_classes)
 )
 
 total_iters = 40000
-checkpoint_config = dict(by_epoch=False, interval=1000)
-evaluation = dict(interval=1000, metric='mIoU', pre_eval=True)
+checkpoint_config = dict(by_epoch=False, interval=4000)
+evaluation = dict(interval=4000, metric='mIoU', pre_eval=True)
 runner = None
 find_unused_parameters = True

@@ -1,5 +1,5 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-from .OShead import OSHead, DecoupledOSHead
+from .OShead import OSHead, DecoupledOSHead, DecoupledSegformerHead
 from .aspp_head import ASPPHead
 from .fcn_head import FCNHead
 from .segformer_head import SegformerHead
@@ -10,5 +10,6 @@ __all__ = [
     'DepthwiseSeparableASPPHead',
     'SegformerHead',
     'OSHead',
-    'DecoupledOSHead'
+    'DecoupledOSHead',
+    'DecoupledSegformerHead'
 ]
