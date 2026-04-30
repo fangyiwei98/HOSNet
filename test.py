@@ -23,10 +23,13 @@ from mmseg.utils import setup_multi_processes
 def parse_args():
     parser = argparse.ArgumentParser(description='mmseg test (and eval) a model')
     # 添加测试配置文件和检查点文件的参数
-    parser.add_argument('--config', default='experiments/segformerb5/config/PCANet_40k_PotsdamRGB2Vaihingen.py', help='test config file path')
-    parser.add_argument('--checkpoint', default='/data/fywdata/code/fyw/UDA/APANet/experiments/segformerb5/myresults_P(RGB)2V/iter_37000.pth', help='checkpoint file')
+    parser.add_argument('--config', default='experiments/segformerb5/config_LoveDA/OSNet_40k_R2U.py', help='test config file path')
+    parser.add_argument('--checkpoint', default='/data/fywdata/fyw/UDA/OSUDA/MyNet/myresults_R2U_segformerconf0.5/iter_20000.pth', help='checkpoint file')
     # 添加工作目录参数，用于保存评估结果
     parser.add_argument('--work-dir',help=('if specified, the evaluation metric results will be dumped into the directory as json'))
+    # 添加保存绘制图像的目录参数
+    parser.add_argument('--show-dir', default='/data/fywdata/fyw/UDA/OSUDA/MyNet/myresults_R2U/iter_24000/',
+                        help='directory where painted images will be saved')
     # 添加使用翻转和多尺度增强的参数
     parser.add_argument('--aug-test', action='store_true', help='Use Flip and Multi scale aug')
     # 添加输出结果文件的参数
@@ -40,8 +43,6 @@ def parse_args():
         ' for generic datasets, and "cityscapes" for Cityscapes')
     # 添加显示结果的参数
     parser.add_argument('--show', action='store_true', help='show results')
-    # 添加保存绘制图像的目录参数
-    parser.add_argument('--show-dir',default='/data/fywdata/code/fyw/UDA/APANet/experiments/segformerb5/myresults_P(RGB)2V/vis/iter_37000/', help='directory where painted images will be saved')
     # 添加使用GPU收集结果的参数
     parser.add_argument('--gpu-collect',action='store_true',help='whether to use gpu to collect results.')
     # 添加指定GPU ID的参数
