@@ -148,7 +148,7 @@ def parse_args():
     parser.add_argument('--config',
                         default='experiments/segformerb5/config/OSNet_40k_Potsdam2Vaihingen.py')
     parser.add_argument('--checkpoint',
-                        default='/data/fywdata/fyw/UDA/OSUDA/MyNet/myresults_P2V_segformer/iter_8000.pth')
+                        default='/data/fywdata/fyw/UDA/OSUDA/MyNet/myresults_P2V_segformer/iter_4000.pth')
 
     # 直接指定源域和目标域的图像/标签目录（不走训练数据集类）
     parser.add_argument('--src-img-dir',
