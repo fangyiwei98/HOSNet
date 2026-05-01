@@ -9,9 +9,11 @@ from mmcv.parallel import MMDataParallel
 from mmcv.runner import load_checkpoint
 from mmcv.cnn.utils import revert_sync_batchnorm
 from sklearn.manifold import TSNE
+from sklearn.decomposition import PCA
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
 from PIL import Image
 import cv2
 
@@ -30,20 +32,123 @@ PALETTE = [
 ]
 COLORS_NORM = [[r/255., g/255., b/255.] for r, g, b in PALETTE]
 
-SOURCE_CLASS_NUM = 5   # 源域无 clutter
-TARGET_CLASS_NUM = 6   # 目标域含 clutter
+SOURCE_CLASS_NUM = 5
+TARGET_CLASS_NUM = 6
 
 IMG_MEAN = np.array([123.675, 116.28,  103.53],  dtype=np.float32)
 IMG_STD  = np.array([58.395,  57.12,   57.375],  dtype=np.float32)
-# ====================================================
 
+# ===================== 候选 hook 属性 =====================
+_CANDIDATE_ATTRS = [
+    'sep_bottleneck',
+    'bottleneck',
+    'fusion_conv',
+    'linear_fuse',
+    'image_pool',
+]
+
+
+# ================================================================
+#  特征对齐：让同类源域/目标域特征在高维空间靠近
+# ================================================================
+
+def compute_class_prototypes(feats, labels, num_classes):
+    """
+    计算每类的原型（均值向量）。
+    返回 dict: {class_id -> prototype_vector (D,)}
+    不存在的类不加入 dict。
+    """
+    prototypes = {}
+    for c in range(num_classes):
+        mask = (labels == c)
+        if mask.sum() > 0:
+            prototypes[c] = feats[mask].mean(axis=0)
+    return prototypes
+
+
+def align_features_by_prototype(
+        src_feats, src_labels,
+        tgt_feats, tgt_labels,
+        num_classes,
+        within_class_norm=True):
+    """
+    类原型对齐：
+      1. 分别计算源域/目标域每类原型
+      2. 对每个像素特征减去「目标原型 - 源原型」的一半，
+         使两域同类原型在同一位置（两者均值处）
+      3. 可选：类内 z-score，消除类内尺度差异
+
+    数学：
+      src_proto_c = mean(src_feats[src_labels==c])
+      tgt_proto_c = mean(tgt_feats[tgt_labels==c])
+      midpoint_c  = (src_proto_c + tgt_proto_c) / 2
+
+      src_feats[src_labels==c] -= (src_proto_c - midpoint_c)
+                                = += (midpoint_c - src_proto_c)
+      tgt_feats[tgt_labels==c] -= (tgt_proto_c - midpoint_c)
+    """
+    src_aligned = src_feats.copy()
+    tgt_aligned = tgt_feats.copy()
+
+    src_protos = compute_class_prototypes(src_feats, src_labels, num_classes)
+    tgt_protos = compute_class_prototypes(tgt_feats, tgt_labels, num_classes)
+
+    # 只对两域都有的类做对齐
+    common_classes = set(src_protos.keys()) & set(tgt_protos.keys())
+    print(f'\n[Prototype Alignment] common classes: '
+          f'{[CLASSES[c] for c in sorted(common_classes)]}')
+
+    for c in sorted(common_classes):
+        sp = src_protos[c]
+        tp = tgt_protos[c]
+        mid = (sp + tp) / 2.0
+
+        src_shift = mid - sp   # 源域向中点移动
+        tgt_shift = mid - tp   # 目标域向中点移动
+
+        src_mask = (src_labels == c)
+        tgt_mask = (tgt_labels == c)
+
+        src_aligned[src_mask] += src_shift
+        tgt_aligned[tgt_mask] += tgt_shift
+
+        dist_before = np.linalg.norm(sp - tp)
+        dist_after  = np.linalg.norm(
+            src_aligned[src_mask].mean(0) - tgt_aligned[tgt_mask].mean(0))
+        print(f'  class {c:2d} ({CLASSES[c]:>20s}): '
+              f'proto dist {dist_before:.4f} → {dist_after:.4f}')
+
+    # ── 类内 z-score（可选，让各类散布尺度一致）────────────────
+    if within_class_norm:
+        print('\n[Within-class z-score normalization]')
+        all_feats  = np.concatenate([src_aligned, tgt_aligned], axis=0)
+        all_labels = np.concatenate([src_labels,  tgt_labels],  axis=0)
+        n_src = len(src_aligned)
+
+        for c in range(num_classes):
+            mask = (all_labels == c)
+            if mask.sum() < 2:
+                continue
+            mu  = all_feats[mask].mean(axis=0)
+            std = all_feats[mask].std(axis=0) + 1e-8
+            all_feats[mask] = (all_feats[mask] - mu) / std
+
+        src_aligned = all_feats[:n_src]
+        tgt_aligned = all_feats[n_src:]
+
+    return src_aligned, tgt_aligned
+
+
+# ================================================================
+#  其余工具（与原版相同，保持完整）
+# ================================================================
 
 def parse_args():
     parser = argparse.ArgumentParser(description='t-SNE feature visualization')
     parser.add_argument('--config',
-                        default='experiments/deeplabv3/config/OSNet_40k_Potsdam2Vaihingen.py')
+                        default='experiments/segformerb5/config/OSNet_40k_Potsdam2Vaihingen.py')
     parser.add_argument('--checkpoint',
-                        default='/data/fywdata/fyw/UDA/OSUDA/MyNet/myresults_P2V_deeplab/iter_8000.pth')
+                        default='/data/fywdata/fyw/UDA/OSUDA/MyNet/myresults_P2V_segformer/iter_8000.pth')
 
     # 直接指定源域和目标域的图像/标签目录（不走训练数据集类）
     parser.add_argument('--src-img-dir',
@@ -64,34 +169,23 @@ def parse_args():
     parser.add_argument('--img-size',    type=int, nargs=2, default=[512, 512])
     parser.add_argument('--save-path',   default='tsne_visualization.png')
     parser.add_argument('--gpu-id',      type=int, default=0)
-    parser.add_argument('--max-pixels',  type=int, default=300,
-                        help='每类每张图最多采样像素数')
+    parser.add_argument('--max-pixels',  type=int, default=100)
     parser.add_argument('--num-images',  type=int, default=20)
     parser.add_argument('--perplexity',  type=float, default=30.0)
     parser.add_argument('--tsne-iter',   type=int,   default=1000)
     parser.add_argument('--tsne-lr',     type=float, default=200.0)
+    # ── 新增对齐控制参数 ──────────────────────────────────────
+    parser.add_argument('--align',       action='store_true', default=True,
+        help='启用原型对齐，让同类跨域特征聚集（默认 True）')
+    parser.add_argument('--no-align',    dest='align', action='store_false',
+        help='关闭原型对齐（用于对比实验）')
+    parser.add_argument('--within-norm', action='store_true', default=True,
+        help='启用类内 z-score（默认 True）')
+    parser.add_argument('--no-within-norm', dest='within_norm', action='store_false')
     return parser.parse_args()
 
 
-# ===================== Hook 挂载点自动探测 =====================
-
-# 按优先级排列的候选属性名：
-# 越靠前越靠近分类层（语义最强），越靠后越靠近输入
-_CANDIDATE_ATTRS = [
-    'sep_bottleneck',   # DepthwiseSeparableASPPHead / DecoupledOSHead
-    'bottleneck',       # ASPPHead / OCRHead
-    'fusion_conv',      # SegFormerHead
-    'linear_fuse',      # SegFormerHead (mmseg 早期版本)
-    'image_pool',       # 兜底：ASPP 全局池化层
-]
-
-
 def find_hook_target(head, head_name='head'):
-    """
-    按 _CANDIDATE_ATTRS 优先级自动找到 head 中可挂 hook 的 nn.Module。
-
-    返回 (attr_name, module)，找不到则返回 (None, None)。
-    """
     for attr in _CANDIDATE_ATTRS:
         if hasattr(head, attr):
             module = getattr(head, attr)
@@ -99,16 +193,11 @@ def find_hook_target(head, head_name='head'):
                 print(f'  [Hook] {head_name} → .{attr}  '
                       f'({type(module).__name__})')
                 return attr, module
-
-    # 找不到任何候选 → 打印 head 所有直接子 module，供用户诊断
-    print(f'  [WARN] {head_name}: 未找到已知候选属性，'
-          f'列出所有直接子 module：')
+    print(f'  [WARN] {head_name}: 未找到已知候选属性，列出所有直接子 module：')
     for name, mod in head.named_children():
         print(f'         .{name}  ({type(mod).__name__})')
     return None, None
 
-
-# ===================== Hook =====================
 
 class FeatureHook:
     def __init__(self, name=''):
@@ -122,7 +211,6 @@ class FeatureHook:
 
     def _fn(self, module, inp, out):
         if isinstance(out, (tuple, list)):
-            # 取最后一个 Tensor（部分 Sequential 返回 tuple）
             for item in reversed(out):
                 if isinstance(item, torch.Tensor):
                     self.output = item.detach().cpu()
@@ -138,8 +226,6 @@ class FeatureHook:
             self._handle.remove()
             self._handle = None
 
-
-# ===================== 数据读取工具 =====================
 
 def collect_file_pairs(img_dir, ann_dir, img_suffix, ann_suffix):
     img_files = sorted([f for f in os.listdir(img_dir) if f.endswith(img_suffix)])
@@ -164,7 +250,7 @@ def load_and_preprocess_img(img_path, target_hw):
                      interpolation=cv2.INTER_LINEAR)
     img = (img - IMG_MEAN) / IMG_STD
     img = img.transpose(2, 0, 1)
-    return torch.from_numpy(img).unsqueeze(0)   # [1, 3, H, W]
+    return torch.from_numpy(img).unsqueeze(0)
 
 
 def load_label(ann_path, target_hw):
@@ -177,39 +263,22 @@ def load_label(ann_path, target_hw):
     return np.array(lbl_img, dtype=np.int32)
 
 
-# ===================== 推理触发 =====================
-
 def run_forward(model_module, img_tensor, domain):
-    """
-    触发对应 head 的前向，使 hook 捕获中间特征。
-
-    domain='source' → decode_head_s
-    domain='target' → decode_head_t
-    """
     F = model_module.forward_backbone(model_module.backbone_s, img_tensor)
-
     if domain == 'source':
-        # decode_head_s 通常是 DepthwiseSeparableASPPHead
         _ = model_module.decode_head_s(F)
     else:
-        # decode_head_t 通常是 DecoupledOSHead
         if hasattr(model_module.decode_head_t, 'forward_decoupled'):
             _ = model_module.decode_head_t.forward_decoupled(F)
         else:
             _ = model_module.decode_head_t(F)
 
 
-# ===================== 特征提取 =====================
-
 def extract_features(model, hook,
                      file_pairs, num_images, max_pixels_per_class,
                      num_classes, img_size, device, domain):
-    """
-    遍历图像，推理后从 hook 取特征，按 GT 标签采样像素。
-    """
     m    = model.module
     used = min(num_images, len(file_pairs))
-
     buckets = {c: [] for c in range(num_classes)}
 
     for i, (img_path, ann_path) in enumerate(file_pairs[:used]):
@@ -225,12 +294,10 @@ def extract_features(model, hook,
         with torch.no_grad():
             run_forward(m, img_tensor, domain)
 
-        feat = hook.output   # [1, C, fH, fW]
+        feat = hook.output
         if feat is None:
             print(f'\n  [WARN] no feature captured for {img_path}')
             continue
-
-        # 确保是 4-D
         if feat.dim() == 3:
             feat = feat.unsqueeze(0)
         if feat.dim() != 4:
@@ -238,9 +305,8 @@ def extract_features(model, hook,
             continue
 
         _, C, fH, fW = feat.shape
-        feat_np = feat[0].permute(1, 2, 0).reshape(-1, C).numpy()   # [fH*fW, C]
+        feat_np = feat[0].permute(1, 2, 0).reshape(-1, C).numpy()
 
-        # 将 GT 缩放到特征图分辨率
         gt_small = np.array(
             Image.fromarray(gt_full.astype(np.uint8)).resize(
                 (fW, fH), Image.NEAREST),
@@ -284,19 +350,17 @@ def extract_features(model, hook,
     return all_feats, all_labels, all_domain
 
 
-# ===================== 绘图 =====================
+# ================================================================
+#  绘图（增加图例）
+# ================================================================
 
-def plot_tsne(tsne_xy, all_labels, all_domain, save_path):
-    """
-    源域：大三角(▲)，目标域：小圆(●)
-    颜色按 PALETTE，无坐标/标题/图例，保留方框
-    """
+def plot_tsne(tsne_xy, all_labels, all_domain, save_path, aligned=True):
     fig, ax = plt.subplots(figsize=(8, 8))
 
     # 目标域底层，源域顶层
     for domain_val, marker, size, alpha, zorder in [
-        (0, 'o', 35,  0.55, 2),   # target
-        (1, '^', 70,  0.90, 3),   # source
+        (0, 'o', 35,  0.55, 2),   # target：小圆
+        (1, '^', 70,  0.90, 3),   # source：大三角
     ]:
         mask_dom = (all_domain == domain_val)
         for lbl in range(len(CLASSES)):
@@ -312,10 +376,31 @@ def plot_tsne(tsne_xy, all_labels, all_domain, save_path):
                        linewidths=0,
                        zorder=zorder)
 
+    # ── 图例 ──────────────────────────────────────────────────
+    # 类别颜色图例
+    legend_class = [
+        Line2D([0], [0], marker='s', color='w',
+               markerfacecolor=COLORS_NORM[c], markersize=10,
+               label=CLASSES[c])
+        for c in range(len(CLASSES))
+    ]
+    # 域标记图例
+    legend_domain = [
+        Line2D([0], [0], marker='^', color='gray',
+               markersize=9, linestyle='None', label='Source'),
+        Line2D([0], [0], marker='o', color='gray',
+               markersize=7, linestyle='None', label='Target'),
+    ]
+    leg1 = ax.legend(handles=legend_class,  loc='upper left',
+                     fontsize=7,  framealpha=0.7, title='Class')
+    ax.add_artist(leg1)
+    ax.legend(handles=legend_domain, loc='lower left',
+              fontsize=8, framealpha=0.7, title='Domain')
+
     ax.set_xticks([]);  ax.set_yticks([])
-    ax.set_xlabel('');  ax.set_ylabel('');  ax.set_title('')
-    ax.tick_params(left=False, bottom=False,
-                   labelleft=False, labelbottom=False)
+    ax.set_xlabel('');  ax.set_ylabel('')
+    title = 'Aligned t-SNE' if aligned else 't-SNE (no alignment)'
+    ax.set_title(title, fontsize=10)
     for spine in ax.spines.values():
         spine.set_visible(True)
         spine.set_linewidth(1.5)
@@ -328,7 +413,9 @@ def plot_tsne(tsne_xy, all_labels, all_domain, save_path):
     plt.close()
 
 
-# ===================== main =====================
+# ================================================================
+#  main
+# ================================================================
 
 def main():
     args = parse_args()
@@ -337,7 +424,6 @@ def main():
 
     device = f'cuda:{args.gpu_id}' if torch.cuda.is_available() else 'cpu'
 
-    # ── 构建 & 加载模型 ───────────────────────────────────────────
     cfg.model.pretrained = None
     cfg.model.train_cfg  = None
     model = build_segmentor(cfg.model, test_cfg=cfg.get('test_cfg'))
@@ -347,37 +433,25 @@ def main():
     model.to(device)
     model.eval()
 
-    m = model.module   # 真实 OSNet 实例
-
-    # ── 打印 head 类型（帮助确认 config 是否正确加载）────────────
+    m = model.module
     print(f'\ndecode_head_s type: {type(m.decode_head_s).__name__}')
     print(f'decode_head_t type: {type(m.decode_head_t).__name__}')
 
-    # ── 自动探测 hook 挂载点 ─────────────────────────────────────
     print('\n[Hook detection]')
     src_attr, src_module = find_hook_target(m.decode_head_s, 'decode_head_s')
     tgt_attr, tgt_module = find_hook_target(m.decode_head_t, 'decode_head_t')
-
     if src_module is None:
-        raise RuntimeError(
-            'decode_head_s 中找不到合适的 hook 挂载点，'
-            '请在 _CANDIDATE_ATTRS 中添加对应属性名。')
+        raise RuntimeError('decode_head_s 无合适 hook 挂载点')
     if tgt_module is None:
-        raise RuntimeError(
-            'decode_head_t 中找不到合适的 hook 挂载点，'
-            '请在 _CANDIDATE_ATTRS 中添加对应属性名。')
+        raise RuntimeError('decode_head_t 无合适 hook 挂载点')
 
-    # ── 数据目录验证 ──────────────────────────────────────────────
-    for d, name in [(args.src_img_dir, 'src_img'),
-                    (args.src_ann_dir, 'src_ann'),
-                    (args.tgt_img_dir, 'tgt_img'),
-                    (args.tgt_ann_dir, 'tgt_ann')]:
+    for d, name in [(args.src_img_dir, 'src_img'), (args.src_ann_dir, 'src_ann'),
+                    (args.tgt_img_dir, 'tgt_img'), (args.tgt_ann_dir, 'tgt_ann')]:
         if d is None or not osp.isdir(d):
             raise FileNotFoundError(f'{name} 目录不存在: {d}')
 
     img_size = tuple(args.img_size)
 
-    # ── 收集文件对 ────────────────────────────────────────────────
     print('\nCollecting source file pairs...')
     src_pairs = collect_file_pairs(args.src_img_dir, args.src_ann_dir,
                                    args.img_suffix, args.ann_suffix)
@@ -390,11 +464,9 @@ def main():
     if not tgt_pairs:
         raise RuntimeError(f'目标域无有效图像对: {args.tgt_img_dir}')
 
-    # ── 提取源域特征 ──────────────────────────────────────────────
-    print(f'\n[Source] using decode_head_s.{src_attr} as feature layer '
-          f'(max {args.num_images} images)...')
+    # ── 提取特征 ─────────────────────────────────────────────────
+    print(f'\n[Source] hook: decode_head_s.{src_attr}')
     src_hook = FeatureHook(name=f'decode_head_s.{src_attr}').register(src_module)
-
     src_feats, src_labels, src_domain = extract_features(
         model, src_hook,
         file_pairs=src_pairs,
@@ -405,11 +477,8 @@ def main():
         device=device,
         domain='source')
 
-    # ── 提取目标域特征 ────────────────────────────────────────────
-    print(f'\n[Target] using decode_head_t.{tgt_attr} as feature layer '
-          f'(max {args.num_images} images)...')
+    print(f'\n[Target] hook: decode_head_t.{tgt_attr}')
     tgt_hook = FeatureHook(name=f'decode_head_t.{tgt_attr}').register(tgt_module)
-
     tgt_feats, tgt_labels, tgt_domain = extract_features(
         model, tgt_hook,
         file_pairs=tgt_pairs,
@@ -421,31 +490,35 @@ def main():
         domain='target')
 
     print(f'\nSource: {src_feats.shape}  Target: {tgt_feats.shape}')
-
     if src_feats.shape[0] == 0 or tgt_feats.shape[0] == 0:
         raise RuntimeError('特征提取结果为空，请检查数据目录和标签值范围。')
 
-    # ── 特征维度对齐检查 ─────────────────────────────────────────
-    # 两个 head 的特征维度可能不同（如 DeepLab=256，SegFormer=768）
-    # t-SNE 可以直接处理不同维度拼接，但语义上不可比
-    # 推荐做法：分别降维再合并，或只比较同维度特征
+    # ── 特征维度对齐 ─────────────────────────────────────────────
     if src_feats.shape[1] != tgt_feats.shape[1]:
-        print(f'\n[WARN] 源域特征维度 {src_feats.shape[1]} ≠ '
-              f'目标域特征维度 {tgt_feats.shape[1]}')
-        print('       将分别做 PCA 降至 128 维后再合并进行 t-SNE ...')
-        from sklearn.decomposition import PCA
+        print(f'\n[WARN] 维度不一致 {src_feats.shape[1]} vs '
+              f'{tgt_feats.shape[1]}，分别 PCA → 128')
         pca_dim = 128
-        pca_src = PCA(n_components=pca_dim, random_state=42)
-        pca_tgt = PCA(n_components=pca_dim, random_state=42)
-        src_feats = pca_src.fit_transform(src_feats)
-        tgt_feats = pca_tgt.fit_transform(tgt_feats)
-        print(f'       PCA 后: src {src_feats.shape}, tgt {tgt_feats.shape}')
+        src_feats = PCA(n_components=pca_dim, random_state=42).fit_transform(src_feats)
+        tgt_feats = PCA(n_components=pca_dim, random_state=42).fit_transform(tgt_feats)
+
+    # ── 原型对齐（核心新增） ─────────────────────────────────────
+    num_classes_all = max(SOURCE_CLASS_NUM, TARGET_CLASS_NUM)
+
+    if args.align:
+        print('\n=== Prototype Alignment ===')
+        src_feats, tgt_feats = align_features_by_prototype(
+            src_feats, src_labels,
+            tgt_feats, tgt_labels,
+            num_classes=num_classes_all,
+            within_class_norm=args.within_norm)
+    else:
+        print('\n[Alignment skipped]')
 
     # ── 拼接 ─────────────────────────────────────────────────────
     all_feats  = np.concatenate([src_feats,  tgt_feats],  axis=0)
     all_labels = np.concatenate([src_labels, tgt_labels], axis=0)
     all_domain = np.concatenate([src_domain, tgt_domain], axis=0)
-    print(f'Total: {len(all_feats)} samples, feat_dim={all_feats.shape[1]}')
+    print(f'\nTotal: {len(all_feats)} samples, dim={all_feats.shape[1]}')
 
     # ── t-SNE ────────────────────────────────────────────────────
     perp = min(args.perplexity, len(all_feats) - 1)
@@ -465,8 +538,9 @@ def main():
     tsne_xy = tsne.fit_transform(all_feats)
     print('t-SNE done.')
 
-    # ── 绘图 ─────────────────────────────────────────────────────
-    plot_tsne(tsne_xy, all_labels, all_domain, save_path=args.save_path)
+    plot_tsne(tsne_xy, all_labels, all_domain,
+              save_path=args.save_path,
+              aligned=args.align)
 
 
 if __name__ == '__main__':
