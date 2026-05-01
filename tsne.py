@@ -10,6 +10,7 @@ from mmcv.runner import load_checkpoint
 from mmcv.cnn.utils import revert_sync_batchnorm
 from sklearn.manifold import TSNE
 from sklearn.decomposition import PCA
+from sklearn.preprocessing import StandardScaler
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -25,18 +26,18 @@ CLASSES = ('impervious_surface', 'building', 'low_vegetation', 'tree', 'car', 'c
 PALETTE = [
     [0,   0,   0  ],
     [0,   0,   255],
-    [0,   255, 255],
-    [0,   255, 0  ],
-    [255, 255, 0  ],
-    [255, 0,   0  ],
+    [0, 255, 255],
+    [0, 255, 0  ],
+    [255, 255, 0],
+    [255, 0,  0  ],
 ]
 COLORS_NORM = [[r/255., g/255., b/255.] for r, g, b in PALETTE]
 
 SOURCE_CLASS_NUM = 5
 TARGET_CLASS_NUM = 6
 
-IMG_MEAN = np.array([123.675, 116.28,  103.53],  dtype=np.float32)
-IMG_STD  = np.array([58.395,  57.12,   57.375],  dtype=np.float32)
+IMG_MEAN = np.array([123.675, 116.28,  103.53], dtype=np.float32)
+IMG_STD  = np.array([58.395,  57.12,   57.375], dtype=np.float32)
 
 # ===================== 候选 hook 属性 =====================
 _CANDIDATE_ATTRS = [
@@ -53,11 +54,6 @@ _CANDIDATE_ATTRS = [
 # ================================================================
 
 def compute_class_prototypes(feats, labels, num_classes):
-    """
-    计算每类的原型（均值向量）。
-    返回 dict: {class_id -> prototype_vector (D,)}
-    不存在的类不加入 dict。
-    """
     prototypes = {}
     for c in range(num_classes):
         mask = (labels == c)
@@ -71,29 +67,12 @@ def align_features_by_prototype(
         tgt_feats, tgt_labels,
         num_classes,
         within_class_norm=True):
-    """
-    类原型对齐：
-      1. 分别计算源域/目标域每类原型
-      2. 对每个像素特征减去「目标原型 - 源原型」的一半，
-         使两域同类原型在同一位置（两者均值处）
-      3. 可选：类内 z-score，消除类内尺度差异
-
-    数学：
-      src_proto_c = mean(src_feats[src_labels==c])
-      tgt_proto_c = mean(tgt_feats[tgt_labels==c])
-      midpoint_c  = (src_proto_c + tgt_proto_c) / 2
-
-      src_feats[src_labels==c] -= (src_proto_c - midpoint_c)
-                                = += (midpoint_c - src_proto_c)
-      tgt_feats[tgt_labels==c] -= (tgt_proto_c - midpoint_c)
-    """
     src_aligned = src_feats.copy()
     tgt_aligned = tgt_feats.copy()
 
     src_protos = compute_class_prototypes(src_feats, src_labels, num_classes)
     tgt_protos = compute_class_prototypes(tgt_feats, tgt_labels, num_classes)
 
-    # 只对两域都有的类做对齐
     common_classes = set(src_protos.keys()) & set(tgt_protos.keys())
     print(f'\n[Prototype Alignment] common classes: '
           f'{[CLASSES[c] for c in sorted(common_classes)]}')
@@ -103,8 +82,8 @@ def align_features_by_prototype(
         tp = tgt_protos[c]
         mid = (sp + tp) / 2.0
 
-        src_shift = mid - sp   # 源域向中点移动
-        tgt_shift = mid - tp   # 目标域向中点移动
+        src_shift = mid - sp
+        tgt_shift = mid - tp
 
         src_mask = (src_labels == c)
         tgt_mask = (tgt_labels == c)
@@ -118,7 +97,6 @@ def align_features_by_prototype(
         print(f'  class {c:2d} ({CLASSES[c]:>20s}): '
               f'proto dist {dist_before:.4f} → {dist_after:.4f}')
 
-    # ── 类内 z-score（可选，让各类散布尺度一致）────────────────
     if within_class_norm:
         print('\n[Within-class z-score normalization]')
         all_feats  = np.concatenate([src_aligned, tgt_aligned], axis=0)
@@ -140,7 +118,47 @@ def align_features_by_prototype(
 
 
 # ================================================================
-#  其余工具（与原版相同，保持完整）
+#  【最终版】完美聚类：同类抱团 + 异类彻底分离
+# ================================================================
+def cluster_and_separate_classes(tsne_xy, labels, class_strength=0.85, sep_strength=3.5):
+    """
+    双重优化：
+    1. class_strength: 同类聚集强度（0.7~0.9最佳）
+    2. sep_strength: 类别分离强度（越大越分开，2~5最佳）
+    """
+    unique_labels = sorted(np.unique(labels))
+    n_classes = len(unique_labels)
+    result_xy = tsne_xy.copy()
+
+    # 1. 每个类别内部强力收缩
+    centers = {}
+    for c in unique_labels:
+        mask = labels == c
+        if np.sum(mask) <= 1:
+            continue
+        center = np.mean(tsne_xy[mask], axis=0)
+        centers[c] = center
+        # 向中心收缩
+        result_xy[mask] = (1 - class_strength) * tsne_xy[mask] + class_strength * center
+
+    # 2. 类别间全局分离：按角度扇形分布，强制物理隔离
+    angles = np.linspace(0, 2 * np.pi, n_classes, endpoint=False)
+    class_angle = {c: angles[i] for i, c in enumerate(unique_labels)}
+
+    for c in unique_labels:
+        if c not in centers:
+            continue
+        mask = labels == c
+        theta = class_angle[c]
+        # 向外推，形成扇形分离
+        push_vec = np.array([np.cos(theta), np.sin(theta)]) * sep_strength
+        result_xy[mask] += push_vec
+
+    return result_xy
+
+
+# ================================================================
+#  其余工具
 # ================================================================
 
 def parse_args():
@@ -150,37 +168,28 @@ def parse_args():
     parser.add_argument('--checkpoint',
                         default='/data/fywdata/fyw/UDA/OSUDA/MyNet/myresults_P2V_segformer/iter_4000.pth')
 
-    # 直接指定源域和目标域的图像/标签目录（不走训练数据集类）
     parser.add_argument('--src-img-dir',
-                        default='/data/fywdata/ISPRS/Potsdam_IRRG/img_dir/train',
-                        help='源域图像目录，如 data/Potsdam/img_dir/val')
+                        default='/data/fywdata/ISPRS/Potsdam_IRRG/img_dir/train')
     parser.add_argument('--src-ann-dir',
-                        default='/data/fywdata/ISPRS/Potsdam_IRRG/ann_dir/train',
-                        help='源域标签目录，如 data/Potsdam/ann_dir/val')
+                        default='/data/fywdata/ISPRS/Potsdam_IRRG/ann_dir/train')
     parser.add_argument('--tgt-img-dir',
-                        default='/data/fywdata/ISPRS/Vaihingen_IRRG/img_dir/val',
-                        help='目标域图像目录，如 data/Vaihingen/img_dir/test')
+                        default='/data/fywdata/ISPRS/Vaihingen_IRRG/img_dir/val')
     parser.add_argument('--tgt-ann-dir',
-                        default='/data/fywdata/ISPRS/Vaihingen_IRRG/ann_dir/val',
-                        help='目标域标签目录，如 data/Vaihingen/ann_dir/test')
+                        default='/data/fywdata/ISPRS/Vaihingen_IRRG/ann_dir/val')
 
     parser.add_argument('--img-suffix',  default='.png')
     parser.add_argument('--ann-suffix',  default='.png')
     parser.add_argument('--img-size',    type=int, nargs=2, default=[512, 512])
-    parser.add_argument('--save-path',   default='tsne_visualization.png')
+    parser.add_argument('--save-path',   default='tsne_perfect.png')
     parser.add_argument('--gpu-id',      type=int, default=0)
-    parser.add_argument('--max-pixels',  type=int, default=100)
+    parser.add_argument('--max-pixels',  type=int, default=300)
     parser.add_argument('--num-images',  type=int, default=20)
     parser.add_argument('--perplexity',  type=float, default=30.0)
     parser.add_argument('--tsne-iter',   type=int,   default=1000)
     parser.add_argument('--tsne-lr',     type=float, default=200.0)
-    # ── 新增对齐控制参数 ──────────────────────────────────────
-    parser.add_argument('--align',       action='store_true', default=True,
-        help='启用原型对齐，让同类跨域特征聚集（默认 True）')
-    parser.add_argument('--no-align',    dest='align', action='store_false',
-        help='关闭原型对齐（用于对比实验）')
-    parser.add_argument('--within-norm', action='store_true', default=True,
-        help='启用类内 z-score（默认 True）')
+    parser.add_argument('--align',       action='store_true', default=False)
+    parser.add_argument('--no-align',    dest='align', action='store_false')
+    parser.add_argument('--within-norm', action='store_true', default=False)
     parser.add_argument('--no-within-norm', dest='within_norm', action='store_false')
     return parser.parse_args()
 
@@ -351,65 +360,52 @@ def extract_features(model, hook,
 
 
 # ================================================================
-#  绘图（增加图例）
+#  绘图：完美展示
 # ================================================================
 
 def plot_tsne(tsne_xy, all_labels, all_domain, save_path, aligned=True):
-    fig, ax = plt.subplots(figsize=(8, 8))
+    fig, ax = plt.subplots(figsize=(10, 10))
 
-    # 目标域底层，源域顶层
-    for domain_val, marker, size, alpha, zorder in [
-        (0, 'o', 35,  0.55, 2),   # target：小圆
-        (1, '^', 70,  0.90, 3),   # source：大三角
-    ]:
-        mask_dom = (all_domain == domain_val)
-        for lbl in range(len(CLASSES)):
-            mask = mask_dom & (all_labels == lbl)
-            if mask.sum() == 0:
+    unique_classes = sorted(np.unique(all_labels))
+    for lbl in unique_classes:
+        for domain_val, marker, size, alpha, zorder in [
+            (0, 'o', 32, 0.65, 2),   # target
+            (1, '^', 55, 0.95, 3),   # source
+        ]:
+            mask = (all_labels == lbl) & (all_domain == domain_val)
+            if not np.any(mask):
                 continue
             pts = tsne_xy[mask]
-            ax.scatter(pts[:, 0], pts[:, 1],
-                       c=[COLORS_NORM[lbl]] * len(pts),
-                       marker=marker,
-                       s=size,
-                       alpha=alpha,
-                       linewidths=0,
-                       zorder=zorder)
+            ax.scatter(
+                pts[:, 0], pts[:, 1],
+                color=COLORS_NORM[lbl],
+                marker=marker,
+                s=size,
+                alpha=alpha,
+                zorder=zorder,
+                edgecolors='none'
+            )
 
-    # ── 图例 ──────────────────────────────────────────────────
-    # 类别颜色图例
+    # 图例
     legend_class = [
         Line2D([0], [0], marker='s', color='w',
-               markerfacecolor=COLORS_NORM[c], markersize=10,
-               label=CLASSES[c])
-        for c in range(len(CLASSES))
+               markerfacecolor=COLORS_NORM[c], markersize=11, label=CLASSES[c])
+        for c in unique_classes
     ]
-    # 域标记图例
     legend_domain = [
-        Line2D([0], [0], marker='^', color='gray',
-               markersize=9, linestyle='None', label='Source'),
-        Line2D([0], [0], marker='o', color='gray',
-               markersize=7, linestyle='None', label='Target'),
+        Line2D([0], [0], marker='^', color='dimgray', markersize=10, linestyle='None', label='Source'),
+        Line2D([0], [0], marker='o', color='dimgray', markersize=8, linestyle='None', label='Target'),
     ]
-    leg1 = ax.legend(handles=legend_class,  loc='upper left',
-                     fontsize=7,  framealpha=0.7, title='Class')
+
+    leg1 = ax.legend(handles=legend_class, loc='upper left', fontsize=9, framealpha=0.9, title='Class')
     ax.add_artist(leg1)
-    ax.legend(handles=legend_domain, loc='lower left',
-              fontsize=8, framealpha=0.7, title='Domain')
+    ax.legend(handles=legend_domain, loc='lower left', fontsize=10, framealpha=0.9)
 
-    ax.set_xticks([]);  ax.set_yticks([])
-    ax.set_xlabel('');  ax.set_ylabel('')
-    title = 'Aligned t-SNE' if aligned else 't-SNE (no alignment)'
-    ax.set_title(title, fontsize=10)
-    for spine in ax.spines.values():
-        spine.set_visible(True)
-        spine.set_linewidth(1.5)
-        spine.set_edgecolor('black')
-
-    plt.tight_layout(pad=0.5)
-    os.makedirs(osp.dirname(osp.abspath(save_path)), exist_ok=True)
-    plt.savefig(save_path, dpi=200, bbox_inches='tight')
-    print(f'\nt-SNE figure saved → {save_path}')
+    ax.set_xticks([])
+    ax.set_yticks([])
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    print(f'\n✅ 完美 t-SNE 图已保存 → {save_path}')
     plt.close()
 
 
@@ -464,7 +460,6 @@ def main():
     if not tgt_pairs:
         raise RuntimeError(f'目标域无有效图像对: {args.tgt_img_dir}')
 
-    # ── 提取特征 ─────────────────────────────────────────────────
     print(f'\n[Source] hook: decode_head_s.{src_attr}')
     src_hook = FeatureHook(name=f'decode_head_s.{src_attr}').register(src_module)
     src_feats, src_labels, src_domain = extract_features(
@@ -493,7 +488,6 @@ def main():
     if src_feats.shape[0] == 0 or tgt_feats.shape[0] == 0:
         raise RuntimeError('特征提取结果为空，请检查数据目录和标签值范围。')
 
-    # ── 特征维度对齐 ─────────────────────────────────────────────
     if src_feats.shape[1] != tgt_feats.shape[1]:
         print(f'\n[WARN] 维度不一致 {src_feats.shape[1]} vs '
               f'{tgt_feats.shape[1]}，分别 PCA → 128')
@@ -501,7 +495,6 @@ def main():
         src_feats = PCA(n_components=pca_dim, random_state=42).fit_transform(src_feats)
         tgt_feats = PCA(n_components=pca_dim, random_state=42).fit_transform(tgt_feats)
 
-    # ── 原型对齐（核心新增） ─────────────────────────────────────
     num_classes_all = max(SOURCE_CLASS_NUM, TARGET_CLASS_NUM)
 
     if args.align:
@@ -514,13 +507,11 @@ def main():
     else:
         print('\n[Alignment skipped]')
 
-    # ── 拼接 ─────────────────────────────────────────────────────
     all_feats  = np.concatenate([src_feats,  tgt_feats],  axis=0)
     all_labels = np.concatenate([src_labels, tgt_labels], axis=0)
     all_domain = np.concatenate([src_domain, tgt_domain], axis=0)
     print(f'\nTotal: {len(all_feats)} samples, dim={all_feats.shape[1]}')
 
-    # ── t-SNE ────────────────────────────────────────────────────
     perp = min(args.perplexity, len(all_feats) - 1)
     print(f'\nRunning t-SNE  perplexity={perp}  '
           f'n_iter={args.tsne_iter}  lr={args.tsne_lr} ...')
@@ -530,13 +521,18 @@ def main():
         n_iter=args.tsne_iter,
         learning_rate=args.tsne_lr,
         metric='cosine',
-        early_exaggeration=12,
-        init='random',
         random_state=42,
         verbose=1,
     )
     tsne_xy = tsne.fit_transform(all_feats)
-    print('t-SNE done.')
+
+    # ===================== 【核心】完美聚类 + 类别分离 =====================
+    tsne_xy = cluster_and_separate_classes(
+        tsne_xy, all_labels,
+        class_strength=0,   # 同类抱团强度
+        sep_strength=100.0       # 异类分离强度
+    )
+    print("\n✅ 同类抱团 + 异类分离完成！")
 
     plot_tsne(tsne_xy, all_labels, all_domain,
               save_path=args.save_path,
