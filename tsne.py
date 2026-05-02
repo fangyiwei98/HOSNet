@@ -167,7 +167,7 @@ def parse_args():
     parser.add_argument('--config',
                         default='experiments/segformerb5/config/OSNet_40k_Potsdam2Vaihingen.py')
     parser.add_argument('--checkpoint',
-                        default='/data/fywdata/fyw/UDA/OSUDA/MyNet/myresults_P2V_segformer/iter_4000.pth')
+                        default='/data/fywdata/fyw/UDA/OSUDA/MyNet/myresults_P2V_segformer/iter_8000.pth')
 
     parser.add_argument('--src-img-dir',
                         default='/data/fywdata/ISPRS/Potsdam_IRRG/img_dir/train')
@@ -361,19 +361,18 @@ def extract_features(model, hook,
 
 
 # ================================================================
-#  绘图：完美展示（空心点 + 统一透明度 + 单图例）
+#  绘图：无图例干净版
 # ================================================================
 def plot_tsne(tsne_xy, all_labels, all_domain, save_path, aligned=True):
     fig, ax = plt.subplots(figsize=(6, 6))
 
     unique_classes = sorted(np.unique(all_labels))
-
-    alpha = 0.85
+    alpha = 0.9
 
     for lbl in unique_classes:
         for domain_val, marker, size in [
             (0, 'o', 38),   # target
-            (1, '^', 52),   # source
+            (1, '*', 52),   # source
         ]:
             mask = (all_labels == lbl) & (all_domain == domain_val)
             if not np.any(mask):
@@ -381,48 +380,19 @@ def plot_tsne(tsne_xy, all_labels, all_domain, save_path, aligned=True):
             pts = tsne_xy[mask]
             ax.scatter(
                 pts[:, 0], pts[:, 1],
-                c=COLORS_NORM[lbl],    # 实心颜色
+                c=COLORS_NORM[lbl],
                 marker=marker,
                 s=size,
                 alpha=alpha,
                 zorder=3
             )
 
-    legend_elements = []
-    # 类别图例（实心）
-    for c in unique_classes:
-        legend_elements.append(
-            Line2D([0], [0], marker='o', color='w',
-                   markerfacecolor=COLORS_NORM[c],  # 图例实心
-                   markeredgecolor=COLORS_NORM[c],
-                   markersize=10, label=CLASSES[c])
-        )
-
-    # Source / Target 图例（实心）
-    legend_elements.append(
-        Line2D([0], [0], marker='^', color='w',
-               markerfacecolor='dimgray', markeredgecolor='dimgray',
-               markersize=10, linestyle='None', label='Source')
-    )
-    legend_elements.append(
-        Line2D([0], [0], marker='o', color='w',
-               markerfacecolor='dimgray', markeredgecolor='dimgray',
-               markersize=9, linestyle='None', label='Target')
-    )
-
-    ax.legend(
-        handles=legend_elements,
-        loc='upper left',
-        fontsize=10,
-        framealpha=0.9,
-        ncol=1
-    )
-
+    # 完全移除图例
     ax.set_xticks([])
     ax.set_yticks([])
     plt.tight_layout()
     plt.savefig(save_path, dpi=300, bbox_inches='tight')
-    print(f'\n✅ 实心 t-SNE 图已保存 → {save_path}')
+    print(f'\n✅ 无图例干净 t-SNE 已保存 → {save_path}')
     plt.close()
 # ================================================================
 #  main
