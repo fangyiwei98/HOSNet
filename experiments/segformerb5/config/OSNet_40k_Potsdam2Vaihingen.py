@@ -4,8 +4,8 @@ _base_ = [
 ]
 
 source_included_classes = [
-    'impervious_surface', 'building', 'low_vegetation',
-    'tree', 'car'
+    'impervious_surface', 'building',
+    'tree', 'car', 'clutter'
 ]
 target_included_classes = [
     'impervious_surface', 'building', 'low_vegetation',

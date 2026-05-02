@@ -12,6 +12,7 @@ from sklearn.manifold import TSNE
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 import matplotlib
+
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
@@ -22,22 +23,22 @@ from mmseg.models import build_segmentor
 from mmseg.utils import setup_multi_processes
 
 # ===================== 全局配置 =====================
-CLASSES = ('impervious_surface', 'building', 'low_vegetation', 'tree', 'car', 'clutter')
+CLASSES = ('impervious_surface', 'building', 'low_vegetation', 'tree', 'car', 'unknown')
 PALETTE = [
-    [0,   0,   0  ],
-    [0,   0,   255],
+    [0, 0, 0],
+    [0, 0, 255],
     [0, 255, 255],
-    [0, 255, 0  ],
+    [0, 255, 0],
     [255, 255, 0],
-    [255, 0,  0  ],
+    [255, 0, 0],
 ]
-COLORS_NORM = [[r/255., g/255., b/255.] for r, g, b in PALETTE]
+COLORS_NORM = [[r / 255., g / 255., b / 255.] for r, g, b in PALETTE]
 
 SOURCE_CLASS_NUM = 5
 TARGET_CLASS_NUM = 6
 
-IMG_MEAN = np.array([123.675, 116.28,  103.53], dtype=np.float32)
-IMG_STD  = np.array([58.395,  57.12,   57.375], dtype=np.float32)
+IMG_MEAN = np.array([123.675, 116.28, 103.53], dtype=np.float32)
+IMG_STD = np.array([58.395, 57.12, 57.375], dtype=np.float32)
 
 # ===================== 候选 hook 属性 =====================
 _CANDIDATE_ATTRS = [
@@ -92,22 +93,22 @@ def align_features_by_prototype(
         tgt_aligned[tgt_mask] += tgt_shift
 
         dist_before = np.linalg.norm(sp - tp)
-        dist_after  = np.linalg.norm(
+        dist_after = np.linalg.norm(
             src_aligned[src_mask].mean(0) - tgt_aligned[tgt_mask].mean(0))
         print(f'  class {c:2d} ({CLASSES[c]:>20s}): '
               f'proto dist {dist_before:.4f} → {dist_after:.4f}')
 
     if within_class_norm:
         print('\n[Within-class z-score normalization]')
-        all_feats  = np.concatenate([src_aligned, tgt_aligned], axis=0)
-        all_labels = np.concatenate([src_labels,  tgt_labels],  axis=0)
+        all_feats = np.concatenate([src_aligned, tgt_aligned], axis=0)
+        all_labels = np.concatenate([src_labels, tgt_labels], axis=0)
         n_src = len(src_aligned)
 
         for c in range(num_classes):
             mask = (all_labels == c)
             if mask.sum() < 2:
                 continue
-            mu  = all_feats[mask].mean(axis=0)
+            mu = all_feats[mask].mean(axis=0)
             std = all_feats[mask].std(axis=0) + 1e-8
             all_feats[mask] = (all_feats[mask] - mu) / std
 
@@ -177,18 +178,18 @@ def parse_args():
     parser.add_argument('--tgt-ann-dir',
                         default='/data/fywdata/ISPRS/Vaihingen_IRRG/ann_dir/val')
 
-    parser.add_argument('--img-suffix',  default='.png')
-    parser.add_argument('--ann-suffix',  default='.png')
-    parser.add_argument('--img-size',    type=int, nargs=2, default=[512, 512])
-    parser.add_argument('--save-path',   default='tsne_perfect.png')
-    parser.add_argument('--gpu-id',      type=int, default=0)
-    parser.add_argument('--max-pixels',  type=int, default=300)
-    parser.add_argument('--num-images',  type=int, default=20)
-    parser.add_argument('--perplexity',  type=float, default=30.0)
-    parser.add_argument('--tsne-iter',   type=int,   default=1000)
-    parser.add_argument('--tsne-lr',     type=float, default=200.0)
-    parser.add_argument('--align',       action='store_true', default=False)
-    parser.add_argument('--no-align',    dest='align', action='store_false')
+    parser.add_argument('--img-suffix', default='.png')
+    parser.add_argument('--ann-suffix', default='.png')
+    parser.add_argument('--img-size', type=int, nargs=2, default=[512, 512])
+    parser.add_argument('--save-path', default='tsne_perfect.png')
+    parser.add_argument('--gpu-id', type=int, default=0)
+    parser.add_argument('--max-pixels', type=int, default=100)
+    parser.add_argument('--num-images', type=int, default=20)
+    parser.add_argument('--perplexity', type=float, default=30.0)
+    parser.add_argument('--tsne-iter', type=int, default=1000)
+    parser.add_argument('--tsne-lr', type=float, default=200.0)
+    parser.add_argument('--align', action='store_true', default=False)
+    parser.add_argument('--no-align', dest='align', action='store_false')
     parser.add_argument('--within-norm', action='store_true', default=False)
     parser.add_argument('--no-within-norm', dest='within_norm', action='store_false')
     return parser.parse_args()
@@ -210,8 +211,8 @@ def find_hook_target(head, head_name='head'):
 
 class FeatureHook:
     def __init__(self, name=''):
-        self.name    = name
-        self.output  = None
+        self.name = name
+        self.output = None
         self._handle = None
 
     def register(self, module):
@@ -240,7 +241,7 @@ def collect_file_pairs(img_dir, ann_dir, img_suffix, ann_suffix):
     img_files = sorted([f for f in os.listdir(img_dir) if f.endswith(img_suffix)])
     pairs = []
     for fname in img_files:
-        stem     = fname[: -len(img_suffix)]
+        stem = fname[: -len(img_suffix)]
         ann_path = osp.join(ann_dir, stem + ann_suffix)
         if osp.exists(ann_path):
             pairs.append((osp.join(img_dir, fname), ann_path))
@@ -286,15 +287,15 @@ def run_forward(model_module, img_tensor, domain):
 def extract_features(model, hook,
                      file_pairs, num_images, max_pixels_per_class,
                      num_classes, img_size, device, domain):
-    m    = model.module
+    m = model.module
     used = min(num_images, len(file_pairs))
     buckets = {c: [] for c in range(num_classes)}
 
     for i, (img_path, ann_path) in enumerate(file_pairs[:used]):
-        print(f'  [{domain}] {i+1}/{used}  {osp.basename(img_path)}', end='\r')
+        print(f'  [{domain}] {i + 1}/{used}  {osp.basename(img_path)}', end='\r')
         try:
             img_tensor = load_and_preprocess_img(img_path, img_size).to(device)
-            gt_full    = load_label(ann_path, img_size)
+            gt_full = load_label(ann_path, img_size)
         except Exception as e:
             print(f'\n  [WARN] skip {img_path}: {e}')
             continue
@@ -349,28 +350,30 @@ def extract_features(model, hook,
 
     if not all_feats:
         return (np.zeros((0, 1), dtype=np.float32),
-                np.zeros(0,      dtype=np.int32),
-                np.zeros(0,      dtype=np.int32))
+                np.zeros(0, dtype=np.int32),
+                np.zeros(0, dtype=np.int32))
 
-    all_feats  = np.concatenate(all_feats,  axis=0)
+    all_feats = np.concatenate(all_feats, axis=0)
     all_labels = np.concatenate(all_labels, axis=0)
-    is_source  = int(domain == 'source')
+    is_source = int(domain == 'source')
     all_domain = np.full(len(all_feats), is_source, dtype=np.int32)
     return all_feats, all_labels, all_domain
 
 
 # ================================================================
-#  绘图：完美展示
+#  绘图：完美展示（空心点 + 统一透明度 + 单图例）
 # ================================================================
-
 def plot_tsne(tsne_xy, all_labels, all_domain, save_path, aligned=True):
-    fig, ax = plt.subplots(figsize=(10, 10))
+    fig, ax = plt.subplots(figsize=(6, 6))
 
     unique_classes = sorted(np.unique(all_labels))
+
+    alpha = 0.85
+
     for lbl in unique_classes:
-        for domain_val, marker, size, alpha, zorder in [
-            (0, 'o', 32, 0.65, 2),   # target
-            (1, '^', 55, 0.95, 3),   # source
+        for domain_val, marker, size in [
+            (0, 'o', 38),   # target
+            (1, '^', 52),   # source
         ]:
             mask = (all_labels == lbl) & (all_domain == domain_val)
             if not np.any(mask):
@@ -378,50 +381,62 @@ def plot_tsne(tsne_xy, all_labels, all_domain, save_path, aligned=True):
             pts = tsne_xy[mask]
             ax.scatter(
                 pts[:, 0], pts[:, 1],
-                color=COLORS_NORM[lbl],
+                c=COLORS_NORM[lbl],    # 实心颜色
                 marker=marker,
                 s=size,
                 alpha=alpha,
-                zorder=zorder,
-                edgecolors='none'
+                zorder=3
             )
 
-    # 图例
-    legend_class = [
-        Line2D([0], [0], marker='s', color='w',
-               markerfacecolor=COLORS_NORM[c], markersize=11, label=CLASSES[c])
-        for c in unique_classes
-    ]
-    legend_domain = [
-        Line2D([0], [0], marker='^', color='dimgray', markersize=10, linestyle='None', label='Source'),
-        Line2D([0], [0], marker='o', color='dimgray', markersize=8, linestyle='None', label='Target'),
-    ]
+    legend_elements = []
+    # 类别图例（实心）
+    for c in unique_classes:
+        legend_elements.append(
+            Line2D([0], [0], marker='o', color='w',
+                   markerfacecolor=COLORS_NORM[c],  # 图例实心
+                   markeredgecolor=COLORS_NORM[c],
+                   markersize=10, label=CLASSES[c])
+        )
 
-    leg1 = ax.legend(handles=legend_class, loc='upper left', fontsize=9, framealpha=0.9, title='Class')
-    ax.add_artist(leg1)
-    ax.legend(handles=legend_domain, loc='lower left', fontsize=10, framealpha=0.9)
+    # Source / Target 图例（实心）
+    legend_elements.append(
+        Line2D([0], [0], marker='^', color='w',
+               markerfacecolor='dimgray', markeredgecolor='dimgray',
+               markersize=10, linestyle='None', label='Source')
+    )
+    legend_elements.append(
+        Line2D([0], [0], marker='o', color='w',
+               markerfacecolor='dimgray', markeredgecolor='dimgray',
+               markersize=9, linestyle='None', label='Target')
+    )
+
+    ax.legend(
+        handles=legend_elements,
+        loc='upper left',
+        fontsize=10,
+        framealpha=0.9,
+        ncol=1
+    )
 
     ax.set_xticks([])
     ax.set_yticks([])
     plt.tight_layout()
     plt.savefig(save_path, dpi=300, bbox_inches='tight')
-    print(f'\n✅ 完美 t-SNE 图已保存 → {save_path}')
+    print(f'\n✅ 实心 t-SNE 图已保存 → {save_path}')
     plt.close()
-
-
 # ================================================================
 #  main
 # ================================================================
 
 def main():
     args = parse_args()
-    cfg  = mmcv.Config.fromfile(args.config)
+    cfg = mmcv.Config.fromfile(args.config)
     setup_multi_processes(cfg)
 
     device = f'cuda:{args.gpu_id}' if torch.cuda.is_available() else 'cpu'
 
     cfg.model.pretrained = None
-    cfg.model.train_cfg  = None
+    cfg.model.train_cfg = None
     model = build_segmentor(cfg.model, test_cfg=cfg.get('test_cfg'))
     load_checkpoint(model, args.checkpoint, map_location='cpu')
     model = revert_sync_batchnorm(model)
@@ -507,7 +522,7 @@ def main():
     else:
         print('\n[Alignment skipped]')
 
-    all_feats  = np.concatenate([src_feats,  tgt_feats],  axis=0)
+    all_feats = np.concatenate([src_feats, tgt_feats], axis=0)
     all_labels = np.concatenate([src_labels, tgt_labels], axis=0)
     all_domain = np.concatenate([src_domain, tgt_domain], axis=0)
     print(f'\nTotal: {len(all_feats)} samples, dim={all_feats.shape[1]}')
