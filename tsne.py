@@ -22,23 +22,69 @@ import cv2
 from mmseg.models import build_segmentor
 from mmseg.utils import setup_multi_processes
 
-# ===================== 全局配置 =====================
-CLASSES = ('impervious_surface', 'building', 'low_vegetation', 'tree', 'car', 'unknown')
-PALETTE = [
-    [0, 0, 0],
-    [0, 0, 255],
-    [0, 255, 255],
-    [0, 255, 0],
-    [255, 255, 0],
-    [255, 0, 0],
-]
-COLORS_NORM = [[r / 255., g / 255., b / 255.] for r, g, b in PALETTE]
+# ===================== 全局配置：双数据集支持 =====================
+def set_dataset_config(dataset_name):
+    global CLASSES, PALETTE, COLORS_NORM
+    global SOURCE_CLASS_NUM, TARGET_CLASS_NUM
+    global IMG_MEAN, IMG_STD
+    global DEFAULT_SRC_IMG, DEFAULT_SRC_ANN, DEFAULT_TGT_IMG, DEFAULT_TGT_ANN
+    global DEFAULT_CONFIG, DEFAULT_CHECKPOINT
 
-SOURCE_CLASS_NUM = 5
-TARGET_CLASS_NUM = 6
+    if dataset_name == 'ISPRS':
+        # ISPRS 配置
+        CLASSES = ('impervious_surface', 'building', 'low_vegetation', 'tree', 'car', 'unknown')
+        PALETTE = [
+            [0, 0, 0],
+            [0, 0, 255],
+            [0, 255, 255],
+            [0, 255, 0],
+            [255, 255, 0],
+            [255, 0, 0],
+        ]
+        SOURCE_CLASS_NUM = 5
+        TARGET_CLASS_NUM = 6
+        # 默认路径
+        DEFAULT_SRC_IMG = '/data/fywdata/ISPRS/Potsdam_IRRG/img_dir/train'
+        DEFAULT_SRC_ANN = '/data/fywdata/ISPRS/Potsdam_IRRG/ann_dir/train'
+        DEFAULT_TGT_IMG = '/data/fywdata/ISPRS/Vaihingen_IRRG/img_dir/val'
+        DEFAULT_TGT_ANN = '/data/fywdata/ISPRS/Vaihingen_IRRG/ann_dir/val'
+        # 默认配置文件
+        DEFAULT_CONFIG = 'experiments/segformerb5/config/OSNet_40k_Potsdam2Vaihingen.py'
+        DEFAULT_CHECKPOINT = '/data/fywdata/fyw/UDA/OSUDA/MyNet/myresults_P2V_segformer/iter_8000.pth'
 
-IMG_MEAN = np.array([123.675, 116.28, 103.53], dtype=np.float32)
-IMG_STD = np.array([58.395, 57.12, 57.375], dtype=np.float32)
+    elif dataset_name == 'LoveDA':
+        # LoveDA 配置（7类，agricultural为未知类）
+        CLASSES = (
+            'background', 'building', 'road', 'water',
+            'barren', 'forest', 'agricultural'
+        )
+        PALETTE = [
+            [0, 0, 0],  # background
+            [255, 0, 0],      # building
+            [255, 255, 0],    # road
+            [0, 0, 255],      # water
+            [159, 129, 183],  # barren
+            [0, 255, 0],      # forest
+            [255, 195, 128],  # agricultural (unknown)
+        ]
+        SOURCE_CLASS_NUM = 6
+        TARGET_CLASS_NUM = 7
+        # LoveDA 默认路径
+        DEFAULT_SRC_IMG = '/data/fywdata/LoveDA/Train/Rural/images_png'
+        DEFAULT_SRC_ANN = '/data/fywdata/LoveDA/Train/Rural/masks_png'
+        DEFAULT_TGT_IMG = '/data/fywdata/LoveDA/Val/Urban/images_png'
+        DEFAULT_TGT_ANN = '/data/fywdata/LoveDA/Val/Urban/masks_png'
+        # LoveDA 配置文件（你新增的要求）
+        DEFAULT_CONFIG = 'experiments/segformerb5/config_LoveDA/OSNet_40k_R2U.py'
+        DEFAULT_CHECKPOINT = '/data/fywdata/fyw/UDA/OSUDA/MyNet/myresults_R2U_segformer/iter_4000.pth'
+
+    else:
+        raise ValueError(f"不支持的数据集: {dataset_name}, 请选 ISPRS / LoveDA")
+
+    COLORS_NORM = [[r / 255., g / 255., b / 255.] for r, g, b in PALETTE]
+    # 图像归一化
+    IMG_MEAN = np.array([123.675, 116.28, 103.53], dtype=np.float32)
+    IMG_STD = np.array([58.395, 57.12, 57.375], dtype=np.float32)
 
 # ===================== 候选 hook 属性 =====================
 _CANDIDATE_ATTRS = [
@@ -164,19 +210,18 @@ def cluster_and_separate_classes(tsne_xy, labels, class_strength=0.85, sep_stren
 
 def parse_args():
     parser = argparse.ArgumentParser(description='t-SNE feature visualization')
-    parser.add_argument('--config',
-                        default='experiments/segformerb5/config/OSNet_40k_Potsdam2Vaihingen.py')
-    parser.add_argument('--checkpoint',
-                        default='/data/fywdata/fyw/UDA/OSUDA/MyNet/myresults_P2V_segformer/iter_8000.pth')
+    # 新增：数据集选择参数
+    parser.add_argument('--dataset', type=str, default='LoveDA', choices=['ISPRS', 'LoveDA'],
+                        help='选择数据集: ISPRS / LoveDA')
 
-    parser.add_argument('--src-img-dir',
-                        default='/data/fywdata/ISPRS/Potsdam_IRRG/img_dir/train')
-    parser.add_argument('--src-ann-dir',
-                        default='/data/fywdata/ISPRS/Potsdam_IRRG/ann_dir/train')
-    parser.add_argument('--tgt-img-dir',
-                        default='/data/fywdata/ISPRS/Vaihingen_IRRG/img_dir/val')
-    parser.add_argument('--tgt-ann-dir',
-                        default='/data/fywdata/ISPRS/Vaihingen_IRRG/ann_dir/val')
+    # 路径会根据 dataset 自动覆盖默认值
+    parser.add_argument('--config', default=None)
+    parser.add_argument('--checkpoint', default=None)
+
+    parser.add_argument('--src-img-dir', default=None)
+    parser.add_argument('--src-ann-dir', default=None)
+    parser.add_argument('--tgt-img-dir', default=None)
+    parser.add_argument('--tgt-ann-dir', default=None)
 
     parser.add_argument('--img-suffix', default='.png')
     parser.add_argument('--ann-suffix', default='.png')
@@ -400,6 +445,27 @@ def plot_tsne(tsne_xy, all_labels, all_domain, save_path, aligned=True):
 
 def main():
     args = parse_args()
+
+    # ========== 核心：根据 dataset 自动加载全部配置 ==========
+    set_dataset_config(args.dataset)
+    print(f"\n✅ 已加载数据集配置: {args.dataset}")
+    print(f"   类别: {CLASSES}")
+
+    # 自动填充所有默认路径（包括 config + checkpoint）
+    if args.config is None:
+        args.config = DEFAULT_CONFIG
+    if args.checkpoint is None:
+        args.checkpoint = DEFAULT_CHECKPOINT
+    if args.src_img_dir is None:
+        args.src_img_dir = DEFAULT_SRC_IMG
+    if args.src_ann_dir is None:
+        args.src_ann_dir = DEFAULT_SRC_ANN
+    if args.tgt_img_dir is None:
+        args.tgt_img_dir = DEFAULT_TGT_IMG
+    if args.tgt_ann_dir is None:
+        args.tgt_ann_dir = DEFAULT_TGT_ANN
+
+    # ======================================================
     cfg = mmcv.Config.fromfile(args.config)
     setup_multi_processes(cfg)
 
@@ -515,7 +581,7 @@ def main():
     tsne_xy = cluster_and_separate_classes(
         tsne_xy, all_labels,
         class_strength=0,   # 同类抱团强度
-        sep_strength=100.0       # 异类分离强度
+        sep_strength=150.0       # 异类分离强度
     )
     print("\n✅ 同类抱团 + 异类分离完成！")
 
