@@ -441,13 +441,21 @@ class OSNet(BaseSegmentor):
             )
 
     def _mine_target_masks(self, pred_src_known, pred_tgt_known):
-        prob_src = F.softmax(pred_src_known, dim=1)
-        prob_tgt = F.softmax(pred_tgt_known, dim=1)
-
-        src_conf, src_cls_local = torch.max(prob_src, dim=1)
-        tgt_conf, tgt_cls_local = torch.max(prob_tgt, dim=1)
-
-        discrepancy = torch.mean(torch.abs(prob_src - prob_tgt), dim=1)
+        if self.num_known_classes == 1:
+            # 单类用 sigmoid 得到概率，避免 softmax 恒为 1
+            prob_src = torch.sigmoid(pred_src_known)  # (B, 1, H, W)
+            prob_tgt = torch.sigmoid(pred_tgt_known)
+            src_conf = prob_src[:, 0, :, :]  # (B, H, W)
+            tgt_conf = prob_tgt[:, 0, :, :]
+            src_cls_local = torch.zeros_like(src_conf, dtype=torch.long)
+            tgt_cls_local = torch.zeros_like(tgt_conf, dtype=torch.long)
+            discrepancy = torch.abs(prob_src - prob_tgt).squeeze(1)  # (B, H, W)
+        else:
+            prob_src = F.softmax(pred_src_known, dim=1)
+            prob_tgt = F.softmax(pred_tgt_known, dim=1)
+            src_conf, src_cls_local = torch.max(prob_src, dim=1)
+            tgt_conf, tgt_cls_local = torch.max(prob_tgt, dim=1)
+            discrepancy = torch.mean(torch.abs(prob_src - prob_tgt), dim=1)
 
         known_mask = (
             (src_cls_local == tgt_cls_local) &
@@ -611,11 +619,6 @@ class OSNet(BaseSegmentor):
         return self.backbone_s(img)
 
     def _merge_known_unknown_logits_with_gate(self, P_t_known, P_t_unknown):
-        """
-        Gated fusion for inference:
-        - known area: only known logits are active
-        - unknown area: only unknown logits are active
-        """
         B, _, H, W = P_t_known.shape
         device = P_t_known.device
         dtype = P_t_known.dtype
@@ -627,13 +630,17 @@ class OSNet(BaseSegmentor):
             dtype=dtype
         )
 
+        # --- 写入已知 / 未知 logits ---
         full_logits[:, self.source_to_target_idx, :, :] = P_t_known
-
         if self.num_unknown_classes > 0 and P_t_unknown.shape[1] > 0:
             full_logits[:, self.unknown_idx, :, :] = P_t_unknown + self.infer_unknown_logit_bias
 
-        known_prob = F.softmax(P_t_known, dim=1)
-        known_conf, _ = torch.max(known_prob, dim=1)
+        # --- 计算已知类置信度 ---
+        if self.num_known_classes == 1:
+            known_conf = torch.sigmoid(P_t_known).squeeze(1)  # (B, H, W)
+        else:
+            known_prob = F.softmax(P_t_known, dim=1)
+            known_conf, _ = torch.max(known_prob, dim=1)
 
         unknown_gate = (known_conf < self.infer_known_conf_thresh)
         known_gate = ~unknown_gate
@@ -650,7 +657,6 @@ class OSNet(BaseSegmentor):
                 full_logits[:, known_idx, :, :],
                 torch.full_like(full_logits[:, known_idx, :, :], -100.0)
             )
-
             full_logits[:, unknown_idx, :, :] = torch.where(
                 unknown_mask_expand,
                 full_logits[:, unknown_idx, :, :],
