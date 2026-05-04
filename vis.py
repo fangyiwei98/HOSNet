@@ -11,10 +11,6 @@ from mmcv.cnn.utils import revert_sync_batchnorm
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-from matplotlib import gridspec
-
-from sklearn.linear_model import LinearRegression
-from sklearn.metrics import r2_score
 
 from mmseg.models import build_segmentor
 from mmseg.datasets import build_dataloader, build_dataset
@@ -28,13 +24,8 @@ UNKNOWN_CLASS_ID = -1
 def set_dataset_config(dataset_name):
     global UNKNOWN_CLASS_ID
     if dataset_name == 'ISPRS':
-        # 这里假设 ISPRS 的 unknown 在 eval label space 里是 5
         UNKNOWN_CLASS_ID = 5
     elif dataset_name == 'LoveDA':
-        # 对于你的 LoveDA open-set 配置：
-        # target classes = 7类，agricultural 是 unknown
-        # eval label space 通过 get_gt_seg_map_by_idx() 映射成 0~6
-        # agricultural -> 6
         UNKNOWN_CLASS_ID = 6
 
 
@@ -51,16 +42,8 @@ def compute_unknown_ratio_from_eval_gt(gt_eval, unknown_class_id):
 def compute_per_image_miou(pred, gt, ignore_index=255, exclude_unknown=False, unknown_class_id=None):
     """
     计算单张图像的 mIoU
-
-    参数:
-        pred: HxW, ndarray, 预测类别索引
-        gt:   HxW, ndarray, eval label space 下的GT
-        ignore_index: 忽略标签
-        exclude_unknown: 是否在mIoU中排除unknown类
-        unknown_class_id: unknown类别id（当exclude_unknown=True时需要）
-
-    返回:
-        miou: float
+    pred: HxW, ndarray
+    gt:   HxW, ndarray, eval label space
     """
     pred = np.asarray(pred).astype(np.int64)
     gt = np.asarray(gt).astype(np.int64)
@@ -97,7 +80,6 @@ def compute_per_image_miou(pred, gt, ignore_index=255, exclude_unknown=False, un
 
 
 def get_sample_filename(dataset, idx):
-    """尽量从dataset中获取当前样本文件名，仅用于打印"""
     try:
         img_info = dataset.img_infos[idx]
         if isinstance(img_info, dict):
@@ -111,21 +93,27 @@ def get_sample_filename(dataset, idx):
 
 
 # ===================== 绘图函数 =====================
-def plot_joint_regression_with_hist_and_residuals(
+def plot_linear_regression_square(
         X_list,
         Y_list,
         save_path='image_level_analysis.png',
         dataset_name='Dataset'):
     """
-    绘制:
-      1. 散点图 + 线性回归线
-      2. X边缘直方图
-      3. Y边缘直方图
-      4. 残差箱式图
+    只绘制：
+      - 散点图（论文风格）
+      - 线性拟合曲线
+
+    要求：
+      1) 横坐标固定 [0, 1]
+      2) 纵坐标为百分比 [0, 70]
+      3) 超过 70% 的点忽略
+      4) 正方形图
+      5) 不显示 R^2
     """
     X = np.array(X_list, dtype=np.float64)
     Y = np.array(Y_list, dtype=np.float64)
 
+    # 过滤非法值
     valid = ~(np.isnan(X) | np.isnan(Y) | np.isinf(X) | np.isinf(Y))
     X = X[valid]
     Y = Y[valid]
@@ -134,119 +122,109 @@ def plot_joint_regression_with_hist_and_residuals(
         print('没有有效样本，无法绘图。')
         return
 
-    # 回归
-    lr = LinearRegression()
-    lr.fit(X.reshape(-1, 1), Y)
-    Y_fit = lr.predict(X.reshape(-1, 1))
-    residuals = Y - Y_fit
-    r2 = r2_score(Y, Y_fit)
+    # 转成百分比
+    Y_percent = Y * 100.0
 
-    coef = float(lr.coef_[0])
-    intercept = float(lr.intercept_)
+    # 只保留 <= 70% 的点
+    keep = Y_percent <= 70.0
+    X = X[keep]
+    Y_percent = Y_percent[keep]
 
-    x_line = np.linspace(X.min(), X.max(), 200)
-    y_line = lr.predict(x_line.reshape(-1, 1))
+    if len(X) == 0:
+        print('过滤掉 >70% 的样本后，没有有效样本，无法绘图。')
+        return
 
-    # 布局
-    fig = plt.figure(figsize=(12, 10))
-    gs = gridspec.GridSpec(
-        3, 2,
-        width_ratios=[4.0, 1.2],
-        height_ratios=[1.2, 4.0, 1.4],
-        hspace=0.28,
-        wspace=0.28
-    )
+    # 按横坐标升序排列
+    sort_idx = np.argsort(X)
+    X = X[sort_idx]
+    Y_percent = Y_percent[sort_idx]
 
-    ax_histx = fig.add_subplot(gs[0, 0])
-    ax_scatter = fig.add_subplot(gs[1, 0])
-    ax_histy = fig.add_subplot(gs[1, 1])
-    ax_box = fig.add_subplot(gs[2, 0])
+    # 线性拟合 y = ax + b
+    coef = np.polyfit(X, Y_percent, deg=1)
+    a, b = coef[0], coef[1]
 
-    # ===== 主图：散点 + 回归线 =====
-    ax_scatter.scatter(
-        X, Y,
-        s=45,
-        alpha=0.75,
-        color='#2E86AB',
-        edgecolors='white',
-        linewidths=0.5,
-        label='Samples'
-    )
-    ax_scatter.plot(
-        x_line, y_line,
-        color='red',
-        linewidth=2.0,
-        label=f'Linear fit ($R^2={r2:.3f}$)'
-    )
+    x_line = np.linspace(0.0, 1.0, 300)
+    y_line = a * x_line + b
 
-    ax_scatter.invert_xaxis()
-    ax_scatter.set_xlabel('Unknown class ratio')
-    ax_scatter.set_ylabel('Per-image mIoU')
-    ax_scatter.set_title(
-        f'{dataset_name}: Unknown Ratio vs Per-image mIoU\n'
-        f'y = {coef:.4f}x + {intercept:.4f}'
-    )
-    ax_scatter.grid(alpha=0.3)
-    ax_scatter.legend()
+    # 论文风格绘图
+    plt.rcParams.update({
+        'font.family': 'serif',
+        'font.serif': ['Times New Roman', 'DejaVu Serif', 'STIXGeneral'],
+        'mathtext.fontset': 'stix',
+        'axes.unicode_minus': False
+    })
 
-    # ===== 顶部直方图 =====
-    ax_histx.hist(
+    fig, ax = plt.subplots(figsize=(7.2, 7.2))
+
+    # 散点：更克制、更适合论文
+    ax.scatter(
         X,
-        bins=20,
-        color='#85C1E9',
-        edgecolor='black',
-        alpha=0.85
+        Y_percent,
+        s=28,
+        c='#4C72B0',
+        alpha=0.82,
+        edgecolors='#FFFFFF',
+        linewidths=0.6,
+        marker='o',
+        label='Samples',
+        zorder=3
     )
-    ax_histx.invert_xaxis()
-    ax_histx.set_ylabel('Count')
-    ax_histx.set_title('Histogram of Unknown Class Ratio')
-    ax_histx.grid(alpha=0.2)
-    ax_histx.tick_params(axis='x', labelbottom=False)
 
-    # ===== 右侧直方图 =====
-    ax_histy.hist(
-        Y,
-        bins=20,
-        orientation='horizontal',
-        color='#F5B7B1',
-        edgecolor='black',
-        alpha=0.85
+    # 线性拟合线
+    ax.plot(
+        x_line,
+        y_line,
+        color='#C44E52',
+        linewidth=2.0,
+        linestyle='-',
+        label='Linear fit',
+        zorder=4
     )
-    ax_histy.set_xlabel('Count')
-    ax_histy.set_title('Histogram of Per-image mIoU')
-    ax_histy.grid(alpha=0.2)
-    ax_histy.tick_params(axis='y', labelleft=False)
 
-    # ===== 残差箱式图 =====
-    ax_box.boxplot(
-        residuals,
-        vert=False,
-        patch_artist=True,
-        boxprops=dict(facecolor='#A9DFBF', color='black'),
-        medianprops=dict(color='red', linewidth=2),
-        whiskerprops=dict(color='black'),
-        capprops=dict(color='black'),
-        flierprops=dict(
-            marker='o',
-            markerfacecolor='orange',
-            markeredgecolor='black',
-            markersize=5,
-            linestyle='none'
-        )
+    # 坐标范围固定
+    ax.set_xlim(0.0, 1.0)
+    ax.set_ylim(0.0, 70.0)
+
+    # 标签与标题
+    ax.set_xlabel('Unknown Class Ratio', fontsize=13)
+    ax.set_ylabel('mIoU (%)', fontsize=13)
+    # ax.set_title(f'{dataset_name}', fontsize=14, pad=10)
+
+    # 刻度
+    ax.tick_params(axis='both', which='major', labelsize=11, direction='in', length=5, width=0.8)
+    ax.tick_params(axis='both', which='minor', direction='in', length=3, width=0.6)
+
+    # 网格：轻量、论文风格
+    ax.grid(True, which='major', linestyle='--', linewidth=0.55, color='#D9D9D9', alpha=0.8)
+    ax.set_axisbelow(True)
+
+    # 边框细化
+    for spine in ax.spines.values():
+        spine.set_linewidth(1.0)
+        spine.set_color('#333333')
+
+    # 图例
+    ax.legend(
+        loc='best',
+        fontsize=11,
+        frameon=True,
+        fancybox=False,
+        edgecolor='#B0B0B0'
     )
-    ax_box.axvline(0, color='red', linestyle='--', linewidth=1.5)
-    ax_box.set_xlabel('Residuals (Observed mIoU - Predicted mIoU)')
-    ax_box.set_title('Residual Boxplot')
-    ax_box.grid(alpha=0.3)
+
+    # 正方形绘图区
+    try:
+        ax.set_box_aspect(1)
+    except Exception:
+        pass
 
     plt.tight_layout()
     plt.savefig(save_path, dpi=300, bbox_inches='tight')
     plt.close()
 
     print(f'\n✅ 图像已保存: {save_path}')
-    print(f'有效样本数: {len(X)}')
-    print(f'线性回归方程: y = {coef:.6f}x + {intercept:.6f}')
-    print(f'R² = {r2:.6f}')
+    print(f'过滤后有效样本数: {len(X)}')
+    print(f'线性拟合方程: y = {a:.4f}x + {b:.4f}')
 
 
 # ===================== 主函数 =====================
@@ -274,7 +252,7 @@ def main():
     cfg.gpu_ids = [args.gpu_id]
     setup_multi_processes(cfg)
 
-    # 构建dataset / dataloader
+    # dataset / dataloader
     dataset = build_dataset(cfg.data.test)
     data_loader = build_dataloader(
         dataset,
@@ -284,7 +262,7 @@ def main():
         shuffle=False
     )
 
-    # 构建模型
+    # model
     model = build_segmentor(cfg.model, test_cfg=cfg.get('test_cfg'))
     checkpoint = load_checkpoint(model, args.checkpoint, map_location='cpu')
 
@@ -306,24 +284,18 @@ def main():
 
     with torch.no_grad():
         for idx, data in enumerate(data_loader):
-            # 官方推理
             pred = model(return_loss=False, rescale=True, **data)[0]
             pred = np.asarray(pred).astype(np.int64)
 
-            # 正确获取与当前样本严格对齐的 eval GT
             gt = dataset.get_gt_seg_map_by_idx(idx)
             gt = np.asarray(gt).astype(np.int64)
 
-            # 检查尺寸
             if pred.shape != gt.shape:
                 print(f'Warning: shape mismatch at idx={idx}, pred={pred.shape}, gt={gt.shape}')
-                # 一般 rescale=True 后应一致；如不一致可按需插值/跳过
                 continue
 
-            # 基于 eval GT 统计 unknown ratio
             unknown_ratio = compute_unknown_ratio_from_eval_gt(gt, UNKNOWN_CLASS_ID)
 
-            # 计算单图mIoU
             miou = compute_per_image_miou(
                 pred,
                 gt,
@@ -339,10 +311,10 @@ def main():
             print(
                 f'[{idx+1:04d}/{len(dataset)}] {file_name} | '
                 f'unknown ratio: {unknown_ratio:.4f} | '
-                f'per-image mIoU: {miou:.4f}'
+                f'mIoU: {miou*100:.2f}%'
             )
 
-    plot_joint_regression_with_hist_and_residuals(
+    plot_linear_regression_square(
         Xs,
         Ys,
         save_path=args.save_path,
