@@ -11,6 +11,7 @@ from mmcv.cnn.utils import revert_sync_batchnorm
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
 
 from mmseg.models import build_segmentor
 from mmseg.datasets import build_dataloader, build_dataset
@@ -155,7 +156,7 @@ def collect_points(dataset, data_loader, model, unknown_class_id, exclude_unknow
             )
 
             Xs.append(unknown_ratio)
-            Ys.append(miou+10)
+            Ys.append(miou)
 
             file_name = get_sample_filename(dataset, idx)
             print(
@@ -236,10 +237,10 @@ def plot_dual_linear_regression_with_ci(
         X2_list, Y2_list,
         save_path='image_level_analysis_dual.png',
         dataset_name='Dataset',
-        label1='Single Unknown',
-        label2='Multiple Unknowns'):
+        label1='Single Unknown (remove agriculture)',
+        label2='Multiple Unknowns (remove forest & agriculture)'):
     """
-    在同一张图上绘制两组散点 + 两条线性拟合 + 两组置信区间
+    同一张图上绘制两组散点 + 两条线性拟合 + 两组置信区间 + 增强图例
     """
     X1, Y1 = prepare_xy(X1_list, Y1_list, y_max=70.0)
     X2, Y2 = prepare_xy(X2_list, Y2_list, y_max=70.0)
@@ -256,87 +257,74 @@ def plot_dual_linear_regression_with_ci(
     })
 
     fig, ax = plt.subplots(figsize=(7.2, 7.2))
-
     x_line = np.linspace(0.0, 1.0, 300)
 
     # 配色
     color1 = '#4C72B0'   # 蓝
-    line1 = '#2F5597'
+    line1  = '#2F5597'
     color2 = '#DD8452'   # 橙
-    line2 = '#C44E52'
+    line2  = '#C44E52'
 
-    # 第一组
+    # 存储图例元素
+    legend_elements = []
+
+    # ---------- 第一组 ----------
     if X1 is not None and len(X1) >= 2:
-        coef1 = np.polyfit(X1, Y1, deg=1)
-        y_fit1 = coef1[0] * x_line + coef1[1]
-        ci1_low, ci1_up = bootstrap_linear_ci(X1, Y1, x_line, n_boot=1000, ci=95, seed=42)
-
+        # 散点
         ax.scatter(
             X1, Y1,
-            s=28,
-            c=color1,
-            alpha=0.75,
-            edgecolors='white',
-            linewidths=0.6,
-            marker='o',
-            label=f'{label1} samples',
+            s=28, c=color1, alpha=0.75,
+            edgecolors='white', linewidths=0.6, marker='o',
             zorder=3
         )
-        ax.plot(
-            x_line, y_fit1,
-            color=line1,
-            linewidth=2.0,
-            linestyle='-',
-            label=f'{label1} linear fit',
-            zorder=4
-        )
-        if ci1_low is not None:
-            ax.fill_between(
-                x_line, ci1_low, ci1_up,
-                color=color1,
-                alpha=0.18,
-                zorder=2
-            )
+        # 拟合线
+        coef1 = np.polyfit(X1, Y1, deg=1)
+        y_fit1 = coef1[0] * x_line + coef1[1]
+        ax.plot(x_line, y_fit1, color=line1, linewidth=2.0, linestyle='-', zorder=4)
 
+        # 置信区间
+        ci1_low, ci1_up = bootstrap_linear_ci(X1, Y1, x_line, n_boot=1000, ci=95, seed=42)
+        if ci1_low is not None:
+            ax.fill_between(x_line, ci1_low, ci1_up, color=color1, alpha=0.18, zorder=2, edgecolor=line1, linewidth=1.0)
+
+        # 图例元素
+        legend_elements += [
+            plt.Line2D([0], [0], marker='o', color='w', markerfacecolor=color1,
+                       markersize=7, label=f'{label1} Samples'),
+            plt.Line2D([0], [0], color=line1, linewidth=2, label=f'{label1} Linear Fit'),
+            mpatches.Patch(facecolor=color1, alpha=0.18, edgecolor='none',
+                           label=f'{label1} 95% CI')
+        ]
         print(f'{label1} 线性拟合方程: y = {coef1[0]:.4f}x + {coef1[1]:.4f}')
         print(f'{label1} 有效样本数: {len(X1)}')
 
-    # 第二组
+    # ---------- 第二组 ----------
     if X2 is not None and len(X2) >= 2:
-        coef2 = np.polyfit(X2, Y2, deg=1)
-        y_fit2 = coef2[0] * x_line + coef2[1]
-        ci2_low, ci2_up = bootstrap_linear_ci(X2, Y2, x_line, n_boot=1000, ci=95, seed=123)
-
         ax.scatter(
             X2, Y2,
-            s=28,
-            c=color2,
-            alpha=0.75,
-            edgecolors='white',
-            linewidths=0.6,
-            marker='s',
-            label=f'{label2} samples',
+            s=28, c=color2, alpha=0.75,
+            edgecolors='white', linewidths=0.6, marker='s',
             zorder=3
         )
-        ax.plot(
-            x_line, y_fit2,
-            color=line2,
-            linewidth=2.0,
-            linestyle='-',
-            label=f'{label2} linear fit',
-            zorder=4
-        )
-        if ci2_low is not None:
-            ax.fill_between(
-                x_line, ci2_low, ci2_up,
-                color=color2,
-                alpha=0.18,
-                zorder=2
-            )
+        coef2 = np.polyfit(X2, Y2, deg=1)
+        y_fit2 = coef2[0] * x_line + coef2[1]
+        ax.plot(x_line, y_fit2, color=line2, linewidth=2.0, linestyle='-', zorder=4)
 
+        ci2_low, ci2_up = bootstrap_linear_ci(X2, Y2, x_line, n_boot=1000, ci=95, seed=123)
+        if ci2_low is not None:
+            ax.fill_between(x_line, ci2_low, ci2_up, color=color2, alpha=0.18, zorder=2, edgecolor=line2, linewidth=1.0)
+
+        legend_elements += [
+            plt.Line2D([0], [0], marker='s', color='w', markerfacecolor=color2,
+                       markersize=7, label=f'{label2} Samples'),
+            plt.Line2D([0], [0], color=line2, linewidth=2, label=f'{label2} Linear Fit'),
+            mpatches.Patch(facecolor=color2, alpha=0.18, edgecolor='none',
+                           label=f'{label2} 95% CI')
+        ]
         print(f'{label2} 线性拟合方程: y = {coef2[0]:.4f}x + {coef2[1]:.4f}')
         print(f'{label2} 有效样本数: {len(X2)}')
 
+    # ---------- 坐标轴、网格等 ----------
     ax.set_xlim(0.0, 1.0)
     ax.set_ylim(0.0, 70.0)
 
@@ -353,7 +341,9 @@ def plot_dual_linear_regression_with_ci(
         spine.set_linewidth(1.0)
         spine.set_color('#333333')
 
+    # 图例
     ax.legend(
+        handles=legend_elements,
         loc='best',
         fontsize=10,
         frameon=True,
@@ -399,8 +389,8 @@ def main():
     parser.add_argument('--exclude-unknown-in-miou', action='store_true',
                         help='whether to exclude unknown class when computing per-image mIoU')
 
-    parser.add_argument('--label1', type=str, default='Single Unknown')
-    parser.add_argument('--label2', type=str, default='Multiple Unknowns')
+    parser.add_argument('--label1', type=str, default='Single Unknown (agriculture)')
+    parser.add_argument('--label2', type=str, default='Multiple Unknowns (forest & agriculture)')
 
     args = parser.parse_args()
 
