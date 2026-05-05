@@ -12,6 +12,9 @@ target_included_classes = [
     'tree', 'car', 'clutter'
 ]
 
+closed_set = len(source_included_classes) == len(target_included_classes)
+
+
 FULL_CLASS_WEIGHT = {
     'impervious_surface': 1.0,
     'building': 1.0,
@@ -32,6 +35,7 @@ unknown_class_weight = [
 norm_cfg = dict(type='SyncBN', requires_grad=True)
 model = dict(
     type='OSNet',
+    closed_set=closed_set,
     source_classes=source_included_classes,
     target_classes=target_included_classes,
     pretrained='open-mmlab://resnet50_v1c',

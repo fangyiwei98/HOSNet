@@ -31,21 +31,29 @@ class OSNet(BaseSegmentor):
                  train_cfg=None,
                  test_cfg=None,
                  pretrained=None,
-                 init_cfg=None):
+                 init_cfg=None,
+                 closed_set=False):
         super(OSNet, self).__init__(init_cfg)
 
         assert source_classes is not None and target_classes is not None
 
+        self.closed_set = closed_set
         self.source_classes = source_classes
         self.target_classes = target_classes
 
         source_to_target_indices = [target_classes.index(c) for c in source_classes]
-        unknown_indices = [i for i, c in enumerate(target_classes) if c not in source_classes]
+
+        if closed_set:
+            unknown_indices = []
+            assert len(source_classes) == len(target_classes), \
+                'In closed-set mode, source_classes and target_classes should match.'
+        else:
+            unknown_indices = [i for i, c in enumerate(target_classes) if c not in source_classes]
 
         self.unknown_indices = unknown_indices
         self.num_known_classes = len(source_classes)
         self.num_unknown_classes = len(unknown_indices)
-        self.num_classes = len(target_classes)
+        self.num_classes = len(source_classes) if closed_set else len(target_classes)
 
         self.register_buffer(
             'source_to_target_idx',
@@ -176,14 +184,19 @@ class OSNet(BaseSegmentor):
         known_mask, known_label, unknown_region_mask = \
             self._mine_target_masks(P_t_src_full, P_t_tgt_known)
 
-        unknown_mask, unknown_label_local, unknown_conf = \
-            self._generate_unknown_pseudo_labels_from_head(
-                pred_tgt_unknown=P_t_tgt_unknown,
-                unknown_region_mask=unknown_region_mask
-            )
+        if self.closed_set:
+            unknown_mask = torch.zeros_like(known_mask, dtype=torch.bool)
+            unknown_label_local = torch.zeros_like(known_label, dtype=torch.long)
+            unknown_conf = torch.zeros_like(known_mask, dtype=feat_t_contrast.dtype)
+        else:
+            unknown_mask, unknown_label_local, unknown_conf = \
+                self._generate_unknown_pseudo_labels_from_head(
+                    pred_tgt_unknown=P_t_tgt_unknown,
+                    unknown_region_mask=unknown_region_mask
+                )
 
-        self._update_unknown_anchors_from_pseudo(
-            feat_t_contrast, unknown_mask, unknown_label_local)
+            self._update_unknown_anchors_from_pseudo(
+                feat_t_contrast, unknown_mask, unknown_label_local)
 
         loss_contrast = self._unified_anchor_contrast(
             feat_t_contrast,
@@ -193,19 +206,25 @@ class OSNet(BaseSegmentor):
             unknown_label_local
         )
 
-
-        loss_unknown_seg = self._unknown_pseudo_seg_loss(
-            pred_tgt_unknown=P_t_tgt_unknown,
-            unknown_mask=unknown_mask,
-            unknown_label_local=unknown_label_local
-        )
-
-        total_loss = (
-            loss_seg_s +
-            loss_seg_t +
-            self.loss_contrast_weight * loss_contrast +
-            self.loss_unknown_seg_weight * loss_unknown_seg
-        )
+        if self.closed_set:
+            loss_unknown_seg = P_t_tgt_known.sum() * 0.0
+            total_loss = (
+                    loss_seg_s +
+                    loss_seg_t +
+                    self.loss_contrast_weight * loss_contrast
+            )
+        else:
+            loss_unknown_seg = self._unknown_pseudo_seg_loss(
+                pred_tgt_unknown=P_t_tgt_unknown,
+                unknown_mask=unknown_mask,
+                unknown_label_local=unknown_label_local
+            )
+            total_loss = (
+                    loss_seg_s +
+                    loss_seg_t +
+                    self.loss_contrast_weight * loss_contrast +
+                    self.loss_unknown_seg_weight * loss_unknown_seg
+            )
 
         total_loss.backward()
 
@@ -218,20 +237,25 @@ class OSNet(BaseSegmentor):
         log_vars['loss_contrast'] = loss_contrast.item()
         log_vars['loss_unknown_seg'] = loss_unknown_seg.item()
         log_vars['num_known_pixels'] = known_mask.sum().item()
-        log_vars['num_unknown_region_pixels'] = unknown_region_mask.sum().item()
-        log_vars['num_unknown_pixels'] = unknown_mask.sum().item()
 
-        if unknown_mask.sum() > 0:
-            log_vars['unknown_pseudo_conf'] = unknown_conf[unknown_mask].mean().item()
-        else:
+        if self.closed_set:
+            log_vars['num_unknown_region_pixels'] = 0
+            log_vars['num_unknown_pixels'] = 0
             log_vars['unknown_pseudo_conf'] = 0.0
+        else:
+            log_vars['num_unknown_region_pixels'] = unknown_region_mask.sum().item()
+            log_vars['num_unknown_pixels'] = unknown_mask.sum().item()
 
-        # monitor unknown class usage
-        if self.num_unknown_classes > 1 and unknown_mask.sum() > 0:
-            for u in range(self.num_unknown_classes):
-                log_vars[f'num_unknown_cls_{u}_pixels'] = (
-                    (unknown_mask & (unknown_label_local == u)).sum().item()
-                )
+            if unknown_mask.sum() > 0:
+                log_vars['unknown_pseudo_conf'] = unknown_conf[unknown_mask].mean().item()
+            else:
+                log_vars['unknown_pseudo_conf'] = 0.0
+
+            if self.num_unknown_classes > 1 and unknown_mask.sum() > 0:
+                for u in range(self.num_unknown_classes):
+                    log_vars[f'num_unknown_cls_{u}_pixels'] = (
+                        (unknown_mask & (unknown_label_local == u)).sum().item()
+                    )
 
         self.iteration += 1
 
@@ -619,6 +643,9 @@ class OSNet(BaseSegmentor):
         return self.backbone_s(img)
 
     def _merge_known_unknown_logits_with_gate(self, P_t_known, P_t_unknown):
+        if self.closed_set:
+            return P_t_known
+
         B, _, H, W = P_t_known.shape
         device = P_t_known.device
         dtype = P_t_known.dtype
@@ -630,14 +657,12 @@ class OSNet(BaseSegmentor):
             dtype=dtype
         )
 
-        # --- 写入已知 / 未知 logits ---
         full_logits[:, self.source_to_target_idx, :, :] = P_t_known
         if self.num_unknown_classes > 0 and P_t_unknown.shape[1] > 0:
             full_logits[:, self.unknown_idx, :, :] = P_t_unknown + self.infer_unknown_logit_bias
 
-        # --- 计算已知类置信度 ---
         if self.num_known_classes == 1:
-            known_conf = torch.sigmoid(P_t_known).squeeze(1)  # (B, H, W)
+            known_conf = torch.sigmoid(P_t_known).squeeze(1)
         else:
             known_prob = F.softmax(P_t_known, dim=1)
             known_conf, _ = torch.max(known_prob, dim=1)
@@ -677,14 +702,17 @@ class OSNet(BaseSegmentor):
                 mode='bilinear',
                 align_corners=self.align_corners)
 
-            if P_t_unknown.shape[1] > 0:
-                P_t_unknown = resize(
-                    input=P_t_unknown,
-                    size=img.shape[2:],
-                    mode='bilinear',
-                    align_corners=self.align_corners)
+            if self.closed_set:
+                P_t = P_t_known
+            else:
+                if P_t_unknown.shape[1] > 0:
+                    P_t_unknown = resize(
+                        input=P_t_unknown,
+                        size=img.shape[2:],
+                        mode='bilinear',
+                        align_corners=self.align_corners)
 
-            P_t = self._merge_known_unknown_logits_with_gate(P_t_known, P_t_unknown)
+                P_t = self._merge_known_unknown_logits_with_gate(P_t_known, P_t_unknown)
         else:
             P_t = self.forward_decode_head(self.decode_head_t, F_t)
             P_t = resize(

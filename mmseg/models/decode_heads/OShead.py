@@ -167,19 +167,21 @@ class DecoupledOSHead(ASPPHead):
         self.conv_seg_known = nn.Conv2d(
             self.channels, self.num_known_classes, kernel_size=1)
 
-        self.conv_seg_unknown = nn.Conv2d(
-            self.channels, self.num_unknown_classes, kernel_size=1)
+        if self.num_unknown_classes > 0:
+            self.conv_seg_unknown = nn.Conv2d(
+                self.channels, self.num_unknown_classes, kernel_size=1)
+        else:
+            self.conv_seg_unknown = None
 
-        # 关键修复：
-        # BaseDecodeHead / ASPPHead 默认 init_cfg 会试图初始化 conv_seg
-        # 这里手动清掉，避免 mmcv 再找不存在的 conv_seg
+        # 避免 mmcv 再去初始化已经删除的 conv_seg
         self.init_cfg = None
 
     def init_weights(self):
         """Initialize weights for known / unknown classifiers."""
         super(DecoupledOSHead, self).init_weights()
         normal_init(self.conv_seg_known, mean=0, std=0.01)
-        normal_init(self.conv_seg_unknown, mean=0, std=0.01)
+        if self.conv_seg_unknown is not None:
+            normal_init(self.conv_seg_unknown, mean=0, std=0.01)
 
     def forward_feature(self, inputs):
         x = self._transform_inputs(inputs)
@@ -210,6 +212,9 @@ class DecoupledOSHead(ASPPHead):
         return self.conv_seg_known(feat)
 
     def cls_seg_unknown(self, feat):
+        if self.num_unknown_classes == 0 or self.conv_seg_unknown is None:
+            B, _, H, W = feat.shape
+            return feat.new_empty((B, 0, H, W))
         if self.detach_unknown_from_trunk:
             feat = feat.detach()
         if self.dropout is not None:
@@ -234,9 +239,9 @@ class DecoupledOSHead(ASPPHead):
         Return concatenated known+unknown logits so output num_classes matches target classes.
         """
         feat, known_logits, unknown_logits = self.forward_decoupled(inputs)
+        if unknown_logits.shape[1] == 0:
+            return known_logits
         return torch.cat([known_logits, unknown_logits], dim=1)
-
-
 
 @HEADS.register_module()
 class DecoupledSegformerHead(BaseDecodeHead):
@@ -259,15 +264,19 @@ class DecoupledSegformerHead(BaseDecodeHead):
                  detach_unknown_from_trunk=True,
                  interpolate_mode='bilinear',
                  **kwargs):
-        super().__init__(input_transform='multiple_select',
-                         num_classes=num_known_classes,
-                         **kwargs)
+        super().__init__(
+            input_transform='multiple_select',
+            num_classes=num_known_classes,
+            **kwargs)
+
         self.interpolate_mode = interpolate_mode
         self.num_known_classes = num_known_classes
         self.num_unknown_classes = num_unknown_classes
         self.detach_unknown_from_trunk = detach_unknown_from_trunk
+
         num_inputs = len(self.in_channels)
         assert num_inputs == len(self.in_index)
+
         self.convs = nn.ModuleList()
         for i in range(num_inputs):
             self.convs.append(
@@ -278,26 +287,37 @@ class DecoupledSegformerHead(BaseDecodeHead):
                     stride=1,
                     norm_cfg=self.norm_cfg,
                     act_cfg=self.act_cfg))
+
         self.fusion_conv = ConvModule(
             in_channels=self.channels * num_inputs,
             out_channels=self.channels,
             kernel_size=1,
             norm_cfg=self.norm_cfg)
+
         # 删除父类默认的单分类头
         if hasattr(self, 'conv_seg'):
             del self.conv_seg
+
         # known / unknown 两个分类头
         self.conv_seg_known = nn.Conv2d(
             self.channels, self.num_known_classes, kernel_size=1)
-        self.conv_seg_unknown = nn.Conv2d(
-            self.channels, self.num_unknown_classes, kernel_size=1)
+
+        if self.num_unknown_classes > 0:
+            self.conv_seg_unknown = nn.Conv2d(
+                self.channels, self.num_unknown_classes, kernel_size=1)
+        else:
+            self.conv_seg_unknown = None
+
         # 避免 BaseDecodeHead 的默认 init_cfg 去找不存在的 conv_seg
         self.init_cfg = None
+
     def init_weights(self):
         """Initialize weights for known / unknown classifiers."""
         super(DecoupledSegformerHead, self).init_weights()
         normal_init(self.conv_seg_known, mean=0, std=0.01)
-        normal_init(self.conv_seg_unknown, mean=0, std=0.01)
+        if self.conv_seg_unknown is not None:
+            normal_init(self.conv_seg_unknown, mean=0, std=0.01)
+
     def forward_feature(self, inputs):
         """Return segmentation feature before classifier."""
         inputs = self._transform_inputs(inputs)
@@ -313,32 +333,42 @@ class DecoupledSegformerHead(BaseDecodeHead):
                     align_corners=self.align_corners))
         out = self.fusion_conv(torch.cat(outs, dim=1))
         return out
+
     def cls_seg_known(self, feat):
         """Known classifier."""
         if self.dropout is not None:
             feat = self.dropout(feat)
         return self.conv_seg_known(feat)
+
     def cls_seg_unknown(self, feat):
         """Unknown classifier."""
+        if self.num_unknown_classes == 0 or self.conv_seg_unknown is None:
+            B, _, H, W = feat.shape
+            return feat.new_empty((B, 0, H, W))
         if self.detach_unknown_from_trunk:
             feat = feat.detach()
         if self.dropout is not None:
             feat = self.dropout(feat)
         return self.conv_seg_unknown(feat)
+
     def forward(self, inputs):
         """Default forward returns known logits only."""
         feat = self.forward_feature(inputs)
         return self.cls_seg_known(feat)
+
     def forward_decoupled(self, inputs):
         """Return shared feat, known logits and unknown logits."""
         feat = self.forward_feature(inputs)
         known_logits = self.cls_seg_known(feat)
         unknown_logits = self.cls_seg_unknown(feat)
         return feat, known_logits, unknown_logits
+
     def forward_test(self, inputs, img_metas, test_cfg):
         """For compatibility with mmseg test api.
         Return concatenated known+unknown logits so output num_classes matches
         target classes.
         """
         feat, known_logits, unknown_logits = self.forward_decoupled(inputs)
+        if unknown_logits.shape[1] == 0:
+            return known_logits
         return torch.cat([known_logits, unknown_logits], dim=1)

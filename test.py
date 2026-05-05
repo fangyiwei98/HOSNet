@@ -23,12 +23,12 @@ from mmseg.utils import setup_multi_processes
 def parse_args():
     parser = argparse.ArgumentParser(description='mmseg test (and eval) a model')
     # 添加测试配置文件和检查点文件的参数
-    parser.add_argument('--config', default='experiments/segformerb5/config_LoveDA/OSNet_40k_R2U.py', help='test config file path')
-    parser.add_argument('--checkpoint', default='/data/fywdata/fyw/UDA/OSUDA/MyNet/myresults_R2U_segformerconf0.5/iter_20000.pth', help='checkpoint file')
+    parser.add_argument('--config', default='experiments/segformerb5/config/OSNet_40k_Vaihingen2PotsdamRGB.py', help='test config file path')
+    parser.add_argument('--checkpoint', default='/data/fywdata/fyw/UDA/OSUDA/MyNet/myresults_V2PRGB_segformer/iter_40000.pth', help='checkpoint file')
     # 添加工作目录参数，用于保存评估结果
     parser.add_argument('--work-dir',help=('if specified, the evaluation metric results will be dumped into the directory as json'))
     # 添加保存绘制图像的目录参数
-    parser.add_argument('--show-dir', default='/data/fywdata/fyw/UDA/OSUDA/MyNet/myresults_R2U/iter_24000/',
+    parser.add_argument('--show-dir', default='/data/fywdata/fyw/UDA/OSUDA/MyNet/myresults_V2PRGB/V5/',
                         help='directory where painted images will be saved')
     # 添加使用翻转和多尺度增强的参数
     parser.add_argument('--aug-test', action='store_true', help='Use Flip and Multi scale aug')

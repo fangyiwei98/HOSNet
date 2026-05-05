@@ -5,13 +5,16 @@ _base_ = [
 
 source_included_classes = [
     'background', 'building', 'road',
-    'water', 'barren', 'forest'
+    'water', 'barren', 'forest', 'agricultural'
 ]
 
 target_included_classes = [
     'background', 'building', 'road',
     'water', 'barren', 'forest', 'agricultural'
 ]
+
+closed_set = len(source_included_classes) == len(target_included_classes)
+
 
 FULL_CLASS_WEIGHT = {
     'background': 1.25,
@@ -35,6 +38,7 @@ norm_cfg = dict(type='SyncBN', requires_grad=True)
 
 model = dict(
     type='OSNet',
+    closed_set=closed_set,
     source_classes=source_included_classes,
     target_classes=target_included_classes,
     pretrained=None,
