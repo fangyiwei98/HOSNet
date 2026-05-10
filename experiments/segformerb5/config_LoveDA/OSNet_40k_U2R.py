@@ -5,7 +5,7 @@ _base_ = [
 
 source_included_classes = [
     'background', 'building', 'road',
-    'water', 'barren', 'forest', 'agricultural'
+    'water', 'barren', 'forest'
 ]
 
 target_included_classes = [
