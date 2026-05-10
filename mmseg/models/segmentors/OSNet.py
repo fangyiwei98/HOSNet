@@ -548,11 +548,6 @@ class OSNet(BaseSegmentor):
         feat_all = torch.cat(feat_list, dim=0)
         target_all = torch.cat(target_list, dim=0)
 
-        # all_anchors = torch.cat([self.known_anchors, self.unknown_anchors], dim=0)
-        # all_anchors = F.normalize(all_anchors, dim=1)
-        #
-        # logits = torch.matmul(feat_all, all_anchors.t()) / self.tau_unified
-        # loss = F.cross_entropy(logits, target_all)
         loss = self.supcon_loss_function(feat_all, target_all, self.tau_unified)
 
         return loss
