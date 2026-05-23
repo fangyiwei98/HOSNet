@@ -1,5 +1,5 @@
 
-# 🧠 Submission to ACMMM 2026：Boosting Domain Generalization in Remote Sensing Image Segmentation by Large-scale Style Simulation and Multi-scale Model Fine-Tuning
+# 🧠 Submission to TGRS 2026：Boosting Domain Generalization in Remote Sensing Image Segmentation by Large-scale Style Simulation and Multi-scale Model Fine-Tuning
 
 🧠 Full source code will be released after the paper is accepted.
 
