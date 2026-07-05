@@ -11,12 +11,11 @@ Recent studies have shown that unsupervised domain adaptive semantic segmentatio
 
 ## ✨Highlight
 
-- We propose a novel Style-guided Semantic-embedding Enhanced (SSE) framework, which improves domain generalization performance in RSI segmentation through large-scale style simulation and multi-scale VFM fine-tuning.
-- We propose a Grid-based Fourier Style Transfer (GFST) module to achieve diverse and representative training data. It leverages a million-scale remote sensing dataset to construct a style bank and performs patch-wise style transfer to emulate style variants.
-- We propose a Semantic Embedding Fine-Tuning (SEFT) module to improve domain-invariant representation learning. It embeds multi-scale semantic information into the VFM, empowering the VFM to effectively capture multi-scale remote sensing representations.
-- We provide the theoretical analysis to prove that SSE effectively reduces the domain generalization error bound by improving the diversity of training data and the discriminability of representations. Extensive experimental results show that SSE significantly outperforms state-of-the-art methods.
 
-
+- A novel HOSNet is proposed for RS open-set UDASS, which restores the representation space and improves adaptability through hierarchical purification, structuring, and unification.
+- A DCKU-Miner is proposed to purify the known-class representation space. It distinguishes reliable known and unknown target features through dual-consensus mining over complementary decoder branches by jointly considering prediction consistency, confidence, and distribution discrepancy.
+- A QPUA is proposed to structure the unknown representation space. It assigns reserved representation capacity to each unknown subclass through quota-preserved top-response selection, thereby reducing the optimization bias caused by overrepresented unknown categories.
+- A AUCL module is proposed to unify known and unknown representations. It improves intra-class compactness and inter-class separability through anchor-guided contrastive learning with momentum-updated class anchors.
 
 
 ## 💡Method Overview
@@ -40,33 +39,6 @@ Recent studies have shown that unsupervised domain adaptive semantic segmentatio
 ### 📦Datasets 
 All datasets including [ISPRS](https://www.isprs.org/education/benchmarks/UrbanSemLab/2d-sem-label-potsdam.aspx) dataset and [LoveDA](https://github.com/Junjue-Wang/LoveDA) dataset.
 
-### 🛠️Environment Setup
-To set up your environment, execute the following commands:
-```bash
-conda create -n rein -y
-conda activate rein
-conda install pytorch==2.0.1 torchvision==0.15.2 torchaudio==2.0.2 pytorch-cuda=11.7 -c pytorch -c nvidia -y
-pip install -U openmim
-mim install mmengine
-mim install "mmcv>=2.0.0"
-pip install "mmsegmentation>=1.0.0"
-pip install "mmdet>=3.0.0"
-pip install xformers=='0.0.20' # optional for DINOv2
-pip install -r requirements.txt
-pip install future tensorboard
-```
-
-### 🛠️Pretraining Weights
-* **Download:** Download pre-trained weights from [facebookresearch](https://dl.fbaipublicfiles.com/dinov2/dinov2_vitl14/dinov2_vitl14_pretrain.pth) for testing. Place them in the project directory without changing the file name.
-* **Convert:** Convert pre-trained weights for training or evaluation.
-  ```bash
-  python tools/convert_models/convert_dinov2.py checkpoints/dinov2_vitl14_pretrain.pth checkpoints/dinov2_converted.pth
-  ```
-  (optional for 1024x1024 resolution)
-  ```bash
-  python tools/convert_models/convert_dinov2.py checkpoints/dinov2_vitl14_pretrain.pth checkpoints/dinov2_converted_1024x1024.pth --height 1024 --width 1024
-  ```
-  
 
 ### 🚀Training 
 ```
@@ -76,75 +48,41 @@ CUDA_VISIBLE_DEVICES=1 nohup python -u tools/train.py > train.log 2>&1 &
 
 ## 📊 Results 
 
-### 📊Results on the ISPRS dataset
-
+### 📊 Results on the ISPRS dataset
 
 | Method | Domain | Surf | Bldg | Vegt | Tree | Car | Bkgd | mIoU (%) | Domain | Surf | Bldg | Vegt | Tree | Car | Bkgd | mIoU (%) |
 |--------|--------|------|------|------|------|-----|------|----------|--------|------|------|------|------|-----|------|----------|
-| **DG** |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |
-| DAFormer | P2V | 73.8 | 82.9 | 46.1 | 70.0 | 45.9 | 8.0 | 54.4 | PRGB2V | 64.2 | 73.4 | 4.5 | 9.7 | 42.2 | 1.5 | 32.6 |
-| HRDA | P2V | 75.0 | 78.3 | 43.3 | 68.3 | 50.8 | 12.8 | 54.7 | PRGB2V | 67.1 | 66.9 | 4.1 | 17.5 | 43.0 | 1.8 | 33.4 |
-| MTP | P2V | 75.0 | 84.5 | 51.7 | 70.8 | 65.5 | 25.3 | 62.6 | PRGB2V | 51.0 | 64.8 | 4.4 | 7.5 | 56.8 | 1.9 | 31.1 |
-| Rein | P2V | 79.4 | 90.4 | 54.0 | 71.5 | 53.6 | 13.0 | 60.3 | PRGB2V | 79.1 | 91.2 | 37.0 | 62.2 | 61.1 | 5.7 | 56.1 |
-| CrossEarth | P2V | 83.6 | 91.7 | <u>63.8</u> | 70.2 | 59.5 | **36.3** | 67.5 | PRGB2V | 78.1 | 89.3 | <u>55.2</u> | 72.5 | 61.9 | <u>14.5</u> | 61.9 |
-| CDG | P2V | <u>83.8</u> | **93.2** | 62.9 | **78.6** | **72.7** | 17.3 | <u>68.1</u> | PRGB2V | <u>82.5</u> | **92.4** | 45.2 | **79.4** | **71.0** | 6.9 | <u>62.9</u> |
-| SSE | P2V | **84.6** | <u>93.0</u> | **67.2** | <u>77.7</u> | <u>70.1</u> | <u>29.0</u> | **70.3** | PRGB2V | **82.9** | <u>91.5</u> | **61.4** | <u>79.2</u> | <u>70.7</u> | **23.0** | **68.1** |
-| DAForme | V2P | 64.2 | 66.5 | 54.1 | 28.2 | 66.6 | 6.0 | 47.6 | V2PRGB | 46.0 | 59.4 | 12.6 | 5.8 | 63.5 | 2.9 | 31.7 |
-| HRDA | V2P | 69.2 | 70.1 | 55.6 | 38.9 | 75.6 | <u>10.6</u> | 53.3 | V2PRGB | 54.7 | 54.7 | 11.6 | 14.4 | 72.3 | 6.5 | 35.7 |
-| MTP | V2P | 70.3 | 76.9 | 50.2 | 8.2 | 82.5 | 1.9 | 48.3 | V2PRGB | 58.5 | 76.5 | 44.4 | 10.8 | 82.0 | 1.4 | 48.6 |
-| Rein | V2P | 75.9 | <u>86.5</u> | 60.6 | 37.9 | 80.6 | 4.3 | 57.6 | V2PRGB | <u>70.4</u> | 77.4 | <u>58.6</u> | 13.9 | 78.5 | 4.4 | 50.6 |
-| CrossEarth | V2P | **77.1** | 80.8 | 61.3 | 38.9 | 82.9 | 8.4 | 58.2 | V2PRGB | **72.5** | 73.6 | **58.7** | 22.4 | 81.1 | 7.6 | <u>52.7</u> |
-| CDG | V2P | 73.1 | 85.9 | <u>62.2</u> | <u>41.4</u> | <u>83.7</u> | 10.0 | <u>59.4</u> | V2PRGB | 63.2 | <u>78.9</u> | 49.8 | <u>30.1</u> | <u>82.3</u> | <u>10.5</u> | 52.4 |
-| SSE | V2P | <u>76.6</u> | **88.5** | **63.8** | **43.6** | **84.6** | **20.6** | **63.0** | V2PRGB | 68.8 | **84.2** | 56.0 | **31.6** | **82.7** | **24.6** | **60.5** |
-| **UDA** |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |
-| MCD | P2V | 55.2 | 64.4 | 25.3 | 61.9 | 39.9 | 11.9 | 43.1 | PRGB2V | 50.1 | 60.2 | 27.4 | 54.9 | 29.7 | 5.3 | 37.9 |
-| CLAN | P2V | 51.8 | 60.2 | 33.7 | 61.0 | 35.4 | 19.6 | 43.6 | PRGB2V | 49.0 | 57.6 | 26.8 | 70.1 | 27.4 | 3.3 | 36.3 |
-| CCDA | P2V | 48.2 | 76.8 | 47.0 | 55.0 | 44.9 | 20.7 | 52.0 | PRGB2V | 57.7 | 65.4 | 29.8 | 35.9 | 57.0 | 13.3 | 43.2 |
-| CycleGAN | P2V | 50.2 | 61.2 | 22.2 | 59.0 | 20.5 | 8.6 | 36.5 | PRGB2V | 46.2 | 65.4 | 27.9 | 55.8 | 40.3 | 3.9 | 39.9 |
-| DiGA | P2V | 49.4 | 62.3 | 38.9 | 57.7 | 34.3 | 29.7 | 45.4 | PRGB2V | 51.3 | 78.2 | 31.5 | 57.8 | 48.6 | 9.1 | 46.9 |
-| ProDA | P2V | 55.3 | 68.7 | 32.5 | 61.0 | 42.0 | 8.2 | 44.6 | PRGB2V | 49.8 | 50.5 | 14.9 | 58.5 | 36.9 | 22.5 | 38.9 |
-| MASN | P2V | 60.3 | 69.6 | 44.6 | 61.2 | 50.1 | 21.2 | 50.1 | PRGB2V | 65.2 | 83.4 | 51.6 | 33.4 | 43.5 | 25.4 | 48.9 |
-| CaGAN | P2V | 59.4 | 66.6 | 42.4 | 63.8 | 49.4 | 25.9 | 51.3 | PRGB2V | 62.2 | 70.4 | 31.5 | 55.5 | 47.3 | 11.6 | 45.4 |
-| RCA-DD | P2V | 59.5 | 65.7 | 43.8 | 61.3 | 48.1 | 22.9 | 50.2 | PRGB2V | 46.4 | 68.5 | 32.8 | 58.1 | 49.3 | 10.6 | 44.3 |
-| NAPG | P2V | 65.3 | 82.3 | 47.4 | 62.3 | 28.4 | 30.4 | 52.3 | PRGB2V | 61.3 | 75.2 | 43.9 | 58.6 | 27.3 | 28.3 | 49.3 |
-| MCD | V2P | 37.2 | 54.3 | 33.0 | 39.4 | 48.3 | 3.1 | 35.4 | V2PRGB | 39.6 | 54.6 | 30.2 | 41.5 | 49.3 | 3.8 | 36.5 |
-| CLAN | V2P | 34.0 | 59.9 | 35.3 | 37.7 | 44.9 | 4.6 | 35.3 | V2PRGB | 55.2 | 43.5 | 43.1 | 24.0 | 58.0 | 2.9 | 37.3 |
-| CCDA | V2P | 57.7 | 65.4 | 29.8 | 35.9 | 57.0 | 13.3 | 43.2 | V2PRGB | 64.4 | 66.4 | 47.2 | 37.6 | 59.4 | 12.3 | 46.9 |
-| CycleGAN | V2P | 46.0 | 59.0 | 41.7 | 25.8 | 39.7 | 13.6 | 37.6 | V2PRGB | 51.0 | 53.4 | 36.5 | 35.0 | 48.5 | 11.5 | 39.3 |
-| DiGA | V2P | 60.4 | 64.9 | 9.5 | 48.4 | 76.1 | 4.7 | 44.0 | V2PRGB | 58.4 | 68.1 | 54.9 | 53.2 | 40.3 | 2.3 | 45.9 |
-| ProDA | V2P | 35.9 | 57.6 | 38.8 | 42.6 | 43.3 | 0.9 | 36.5 | V2PRGB | 32.9 | 63.0 | 33.9 | 41.0 | 55.3 | 0.4 | 37.8 |
-| MASN | V2P | 51.5 | 77.5 | 31.2 | 55.4 | 48.7 | 11.0 | 42.1 | V2PRGB | 61.7 | 69.5 | 43.3 | 60.2 | 44.8 | 17.7 | 49.1 |
-| CaGAN | V2P | 49.0 | 64.8 | 38.4 | 43.5 | 45.8 | 3.0 | 40.7 | V2PRGB | 62.5 | 65.8 | 49.6 | 33.2 | 67.1 | 1.1 | 46.6 |
-| RCA-DD | V2P | 44.1 | 57.3 | 36.8 | 41.8 | 57.2 | 3.0 | 40.0 | V2PRGB | 60.4 | 64.0 | 49.0 | 38.6 | 66.0 | 0.2 | 46.4 |
-| NAPG | V2P | 49.7 | 68.0 | 49.3 | 48.6 | 42.9 | 13.4 | 44.7 | V2PRGB | 54.4 | 67.3 | 53.5 | 51.6 | 42.4 | 31.7 | 49.3 |
+| DAFormer | P2V | 67.98 | 77.92 | 43.72 | 64.09 | 43.72 | 0.01 | 49.57 | PRGB2V | <u>70.01</u> | **78.93** | 15.83 | 18.02 | 51.62 | 0.05 | 39.08 |
+| HRDA | P2V | 70.07 | 74.23 | 40.34 | 63.99 | 50.38 | <u>0.61</u> | 49.94 | PRGB2V | **71.33** | 71.43 | 14.04 | 26.71 | 51.54 | <u>0.70</u> | 39.29 |
+| MIC | P2V | 65.28 | 76.92 | 45.05 | 63.85 | <u>54.37</u> | 0.03 | 50.92 | PRGB2V | 58.60 | 70.85 | 17.89 | 23.64 | <u>62.15</u> | 0.21 | 38.89 |
+| SimT | P2V | <u>70.39</u> | <u>81.28</u> | 46.75 | <u>64.18</u> | 47.13 | 0.35 | 51.68 | PRGB2V | 63.67 | 75.79 | 22.96 | 47.75 | 46.62 | 0.08 | 42.81 |
+| MAOSDAN | P2V | **70.57** | 74.82 | **55.24** | 36.16 | **74.16** | 0.17 | 51.85 | PRGB2V | 61.51 | 62.64 | **48.36** | 12.12 | **70.78** | 0.09 | 42.58 |
+| GLC++ | P2V | 69.42 | 80.55 | <u>52.81</u> | 61.14 | 48.69 | 0.08 | 52.12 | PRGB2V | 56.74 | 68.18 | <u>37.84</u> | 52.86 | 41.11 | 0.68 | 42.90 |
+| BUS | P2V | 67.31 | 79.50 | 49.93 | 63.83 | 53.04 | 0.03 | <u>52.27</u> | PRGB2V | 57.88 | 67.36 | 31.81 | <u>56.20</u> | 47.26 | 0.29 | <u>43.47</u> |
+| **HOSNet** | P2V | 68.16 | **85.94** | 46.48 | **73.15** | 48.64 | **0.62** | **53.83** | PRGB2V | 58.08 | <u>76.58</u> | 24.17 | **62.69** | 48.56 | **0.71** | **45.13** |
+| | | | | | | | | | | | | | | | | | |
+| DAFormer | V2P | 65.51 | 67.21 | 53.63 | 29.19 | 68.70 | 2.71 | 47.82 | V2PRGB | 58.94 | 70.40 | 28.68 | 22.89 | 70.58 | 2.38 | 42.31 |
+| HRDA | V2P | 67.53 | 69.74 | 54.46 | **35.50** | 71.54 | 2.70 | 50.24 | V2PRGB | **66.97** | 68.77 | 26.73 | **24.45** | 76.33 | 2.32 | 44.26 |
+| MIC | V2P | <u>70.53</u> | 76.78 | 48.13 | 8.25 | <u>82.62</u> | 3.80 | 48.35 | V2PRGB | 57.91 | <u>75.65</u> | 44.80 | 9.55 | <u>78.27</u> | 3.30 | 44.91 |
+| SimT | V2P | 67.14 | **78.22** | 52.79 | 27.61 | 71.15 | 3.97 | 50.15 | V2PRGB | 63.57 | 71.10 | **51.84** | 10.34 | 67.59 | 3.96 | 44.73 |
+| MAOSDAN | V2P | 68.39 | 72.64 | 54.52 | 33.40 | 70.21 | <u>4.98</u> | 50.69 | V2PRGB | 63.46 | 65.47 | <u>51.27</u> | 15.61 | 69.25 | 4.73 | 44.97 |
+| GLC++ | V2P | 67.24 | 72.00 | 54.22 | <u>34.02</u> | 70.26 | 4.77 | 50.42 | V2PRGB | 62.45 | 64.48 | 50.90 | 14.01 | 67.00 | <u>4.99</u> | 43.97 |
+| BUS | V2P | 65.56 | 75.91 | <u>55.07</u> | 32.63 | 71.59 | 3.58 | <u>50.72</u> | V2PRGB | 57.30 | 71.66 | 44.86 | <u>24.17</u> | 71.06 | 3.82 | <u>45.48</u> |
+| **HOSNet** | V2P | **73.08** | <u>77.17</u> | **55.81** | 24.76 | **83.25** | **6.15** | **53.37** | V2PRGB | <u>66.36</u> | **77.36** | 48.09 | 9.75 | **80.81** | **6.74** | **48.19** |
 
 
-
-### 📊Results on the LoveDA dataset
-
-
+### 📊 Results on the LoveDA dataset
 
 | Method | Domain | Bkgd | Bldg | Rd | Wtr | Barr | Frst | Agri | mIoU (%) | Domain | Bkgd | Bldg | Rd | Wtr | Barr | Frst | Agri | mIoU (%) |
 |--------|--------|------|------|----|-----|------|------|------|----------|--------|------|------|----|-----|------|------|------|----------|
-| **DG** |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |
-| DAFormer | U2R | <u>57.1</u> | 46.9 | 36.5 | 62.9 | <u>12.1</u> | 18.5 | 51.3 | 40.8 | R2U | 40.1 | 55.2 | 51.7 | 69.9 | 43.3 | 51.9 | 49.0 | 51.6 |
-| HRDA | U2R | 50.2 | 46.1 | 40.0 | 66.6 | 6.8 | <u>26.9</u> | 58.1 | 42.1 | R2U | <u>41.6</u> | 57.1 | 53.1 | 63.2 | 45.6 | 51.8 | 56.0 | 52.6 |
-| MTP | U2R | 55.5 | 44.4 | 46.3 | 66.7 | 7.3 | **37.0** | 50.7 | 44.0 | R2U | 40.8 | 59.6 | <u>58.3</u> | 74.4 | 46.6 | 47.4 | 54.6 | 54.5 |
-| Rein | U2R | 57.0 | 56.3 | **49.4** | <u>68.2</u> | 9.3 | 25.5 | 53.5 | 45.6 | R2U | 40.3 | <u>64.0</u> | 56.6 | **76.0** | <u>50.4</u> | <u>55.4</u> | <u>61.1</u> | 57.7 |
-| CrossEarth | U2R | **57.5** | 61.5 | 48.5 | 65.6 | 9.6 | 25.4 | 58.2 | <u>46.6</u> | R2U | 39.8 | 63.3 | 57.3 | <u>75.9</u> | **51.8** | 55.0 | **62.5** | <u>57.9</u> |
-| CDG | U2R | 56.0 | **65.0** | 39.8 | **71.0** | **15.2** | 10.7 | **64.8** | 46.1 | R2U | 41.2 | 62.3 | <u>58.3</u> | 74.8 | 50.0 | 53.9 | 48.2 | 55.5 |
-| SSE | U2R | 54.9 | <u>61.7</u> | <u>49.3</u> | 67.6 | 10.6 | 23.6 | <u>63.6</u> | **47.3** | R2U | **42.6** | **64.8** | **59.7** | 75.0 | 50.0 | **59.2** | 57.0 | **58.3** |
-| **UDA** |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |
-| MCD | U2R | 37.5 | 36.9 | 30.0 | 53.1 | 22.8 | 21.2 | 11.5 | 30.3 | R2U | 38.2 | 35.5 | 23.8 | 51.5 | 13.7 | 48.8 | 39.7 | 35.3 |
-| CLAN | U2R | 34.0 | 38.3 | 34.7 | 64.1 | 30.0 | 13.8 | 16.1 | 32.6 | R2U | 27.6 | 31.5 | 21.9 | 50.7 | 13.6 | 45.0 | 48.1 | 33.5 |
-| CCDA | U2R | 52.2 | 32.1 | 28.8 | 60.1 | 23.1 | 19.9 | 19.0 | 33.4 | R2U | 40.0 | 37.1 | 24.6 | 56.9 | 15.1 | 54.9 | 35.1 | 37.2 |
-| CycleGAN | U2R | 30.1 | 39.8 | 35.5 | 54.9 | 32.7 | 19.2 | 18.4 | 32.5 | R2U | 35.3 | 33.4 | 19.3 | 45.6 | 22.1 | 48.6 | 35.3 | 33.8 |
-| DiGA | U2R | 37.2 | 29.2 | 21.9 | 54.2 | 17.9 | 55.6 | 21.9 | 35.4 | R2U | 40.1 | 33.3 | 28.9 | 56.7 | 19.0 | 55.1 | 37.5 | 38.2 |
-| ProDA | U2R | 45.2 | 35.8 | 33.4 | 49.1 | 27.9 | 22.2 | 14.7 | 32.2 | R2U | 39.0 | 33.8 | 20.2 | 51.1 | 18.2 | 53.7 | 39.1 | 36.3 |
-| MASN | U2R | 38.7 | 27.7 | 21.5 | 54.1 | 18.1 | 34.1 | 55.2 | 34.7 | R2U | 38.1 | 42.7 | 28.8 | 56.1 | 20.7 | 54.7 | 50.4 | 41.1 |
-| CaGAN | U2R | 41.5 | 34.6 | 36.9 | 58.7 | 33.5 | 30.3 | 8.3 | 34.7 | R2U | 30.3 | 42.9 | 26.1 | 53.6 | 24.5 | 52.3 | 54.4 | 40.0 |
-| RCA-DD | U2R | 46.2 | 42.9 | 35.1 | 47.7 | 28.6 | 19.8 | 16.3 | 33.5 | R2U | 28.7 | 43.8 | 29.2 | 45.3 | 24.9 | 51.6 | 53.1 | 38.9 |
-| NAPG | U2R | 47.6 | 31.3 | 33.5 | 68.8 | 36.5 | 32.7 | 9.6 | 36.5 | R2U | 45.1 | 27.3 | 24.2 | 55.8 | 26.8 | 67.2 | 52.6 | 42.3 |
+| DAFormer | U2R | 28.98 | 31.92 | 27.12 | 38.09 | 13.72 | 16.88 | 5.07 | 23.11 | R2U | 42.43 | 41.04 | 33.71 | 63.54 | 27.95 | 47.60 | 5.85 | 37.45 |
+| HRDA | U2R | 29.23 | 32.34 | 27.99 | 49.38 | 13.72 | 5.28 | 5.92 | 23.41 | R2U | <u>45.89</u> | 40.65 | 33.15 | 65.20 | 28.67 | 44.79 | 4.96 | 37.62 |
+| MIC | U2R | 33.05 | 29.85 | 26.37 | 45.03 | 13.39 | 13.28 | 4.75 | 23.67 | R2U | 43.75 | 40.62 | 33.08 | 65.51 | 26.64 | 44.36 | 5.12 | 37.01 |
+| SimT | U2R | 28.18 | <u>33.13</u> | 29.35 | 47.57 | <u>14.82</u> | 10.24 | 5.16 | 24.06 | R2U | 43.78 | 42.09 | 32.74 | 59.18 | <u>33.84</u> | 45.86 | 5.11 | 37.51 |
+| MAOSDAN | U2R | 30.16 | **33.17** | <u>30.42</u> | 43.55 | 14.81 | 16.14 | 5.69 | 24.85 | R2U | 43.68 | 41.88 | 33.36 | 59.81 | 32.20 | 44.26 | 5.29 | 37.21 |
+| GLC++ | U2R | <u>37.08</u> | 30.31 | 24.50 | <u>47.93</u> | **14.83** | **18.04** | <u>7.03</u> | 25.67 | R2U | **46.51** | 40.21 | <u>39.63</u> | 61.19 | 28.70 | <u>47.71</u> | 5.53 | 38.50 |
+| BUS | U2R | 35.01 | 32.93 | 29.83 | 47.32 | 14.67 | <u>17.76</u> | 6.33 | <u>26.26</u> | R2U | 45.74 | <u>46.46</u> | 39.50 | <u>65.54</u> | 30.70 | 47.53 | <u>6.78</u> | <u>40.32</u> |
+| **HOSNet** | U2R | **47.89** | 31.16 | **32.43** | **57.26** | 9.00 | 13.97 | **8.31** | **28.57** | R2U | 28.78 | **54.96** | **52.33** | **72.25** | **41.45** | **50.20** | **7.84** | **43.97** |
 
 
 <!--
@@ -166,14 +104,14 @@ If you use our dataset or code for research, please cite this paper:
 ```
 -->
 
-
+<!--
 ## ⭐Acknowledgment
 Our implementation is mainly based on following repositories. Thanks for their authors.
 * [MMSegmentation](https://github.com/open-mmlab/mmsegmentation)
 * [Rein](https://github.com/w1oves/Rein)
 * [CrossEarth](https://github.com/Cuzyoung/CrossEarth)
 * [CDG](https://github.com/seabearlmx/CDG)
-
+-->
 
 
 ## 📧Contact
