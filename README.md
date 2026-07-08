@@ -25,7 +25,7 @@ Recent studies have shown that unsupervised domain adaptive semantic segmentatio
 
 
 ## 👀Visualization
-### 👀Ablation visualization on the ISPRS and LoveDA datasets. 
+### 👀Visualization on the ISPRS and LoveDA datasets. 
 <img src="images/vis.png" alt="图片描述" width="800">
 
 ### 👀t-SNE visualization of feature representations.
