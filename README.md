@@ -1,5 +1,5 @@
 
-# 🧠 Submission to ISPRS 2026：Open-Set Domain Adaptation for Remote Sensing Image Semantic Segmentation with Hierarchical Representation Learning
+# 🧠 Submission to IF 2026：Open-Set Domain Adaptation for Remote Sensing Image Semantic Segmentation with Hierarchical Representation Learning
 
 🧠 Full source code will be released after the paper is accepted.
 
